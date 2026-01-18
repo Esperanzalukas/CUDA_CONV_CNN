@@ -180,7 +180,7 @@ void forward_conv(float* d_input, float* d_output, float* d_weight, float* d_col
 
     //print_debug_stats_conv("Conv Fwd Input", d_input, batch_size * in_channels * height * width);
     //print_debug_stats_conv("Conv Fwd Weight", d_weight, out_channels * in_channels * ksize * ksize);
-    print_debug_stats_conv("Conv Fwd Output", d_output, batch_size * out_channels * height_out * width_out);
+    //print_debug_stats_conv("Conv Fwd Output", d_output, batch_size * out_channels * height_out * width_out);
 
 }
 

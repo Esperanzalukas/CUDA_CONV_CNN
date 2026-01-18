@@ -1,6 +1,6 @@
 import numpy as np
 import my_deep_lib as cuda
-from basic_operator import Op, Value, as_value
+from core.basic_operator import Op, Value, as_value
 from .module import Module, Parameter
 
 class BatchNorm2DOp(Op):

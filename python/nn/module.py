@@ -1,5 +1,5 @@
 import numpy as np
-from basic_operator import Value
+from core.basic_operator import Value
 import my_deep_lib  # 引入库以进行类型检查
 
 class Parameter(Value):

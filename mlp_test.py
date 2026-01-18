@@ -4,14 +4,14 @@ import time
 import numpy as np
 
 # 1. 确保 Python 路径能找到 nn, optim 等包
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'python'))
 
 # 2. 引入你的深度学习库
 import my_deep_lib as cuda
-from basic_operator import Value
+from core.basic_operator import Value
 from nn import Module, Linear, ReLU, cross_entropy_loss
 from optim import SGD
-from data import DataLoader, CIFAR10Dataset
+from dataloader import DataLoader, CIFAR10Dataset
 
 # === [关键组件] 稳健的 Flatten ===
 class Flatten:

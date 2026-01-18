@@ -1,20 +1,54 @@
-# 创建 .gitignore 文件
-cat <<EOF > .gitignore
 # Python
 __pycache__/
 *.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+*.egg
 
 # C++/CUDA build files
 *.o
 *.so
+*.a
 build/
+cmake-build*/
 
-# Dataset (通常不上传大文件)
-data/
+# Dataset (只忽略根目录的data，不忽略python/data代码模块)
+/data/
+*.zip
+*.tar.gz
 
-# VS Code
+# Logs and outputs (可选择保留)
+/logs/
+*.log
+
+# Checkpoints and models
+*.pt
+*.pth
+*.ckpt
+checkpoints/
+
+# TensorBoard
+runs/
+events.out.*
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
 .vscode/
+.idea/
+*.swp
+*.swo
 
 # OS generated
 .DS_Store
-EOF
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+project_code_summary.txt
+project_export.xml

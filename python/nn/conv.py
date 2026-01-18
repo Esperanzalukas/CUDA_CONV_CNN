@@ -1,6 +1,6 @@
 import numpy as np
 import my_deep_lib as cuda
-from basic_operator import Op, Value, as_value
+from core.basic_operator import Op, Value, as_value
 from .module import Module, Parameter
 
 class Conv2DOp(Op):
@@ -69,11 +69,13 @@ class Conv2D(Module):
         else:
             self.weight = Parameter(w_np)
 
-         # === Bias Init ===
+        # === Bias Init ===
         if bias:
             # bias 形状通常是 [Out_C]，但在做广播加法时，
             # 需要 reshape 成 [1, Out_C, 1, 1] 以便加到 (N, C, H, W) 上
-            self.bias = Parameter(np.zeros((1, out_c, 1, 1), dtype=np.float32))
+            b_np = np.zeros((1, out_c, 1, 1), dtype=np.float32)
+            b_tensor = cuda.Tensor.from_numpy(b_np, cuda.Device.gpu(0))
+            self.bias = Parameter(b_tensor)
         else:
             self.bias = None
     

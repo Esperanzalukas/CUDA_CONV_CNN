@@ -1,14 +1,49 @@
 import sys, os, time
+import json
+import logging
 import numpy as np
+from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
 
 # 引入 C++ 扩展库
 import my_deep_lib 
 
-from basic_operator import Value
+from core.basic_operator import Value
 from nn import Module, Parameter, Conv2D, Linear, ReLU, MaxPool2D, cross_entropy_loss
 from optim import SGD
 from data import DataLoader, CIFAR10Dataset
+
+# ============================================================================
+# TensorBoard + 日志配置
+# ============================================================================
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    USE_TENSORBOARD = True
+except ImportError:
+    USE_TENSORBOARD = False
+
+writer = None
+logger = None
+
+def setup_logging(log_dir):
+    global logger
+    os.makedirs(log_dir, exist_ok=True)
+    logger = logging.getLogger('training')
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(os.path.join(log_dir, 'training.log'))
+    fh.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+    logger.addHandler(fh)
+    return logger
+
+def init_tensorboard(log_dir):
+    global writer
+    if USE_TENSORBOARD:
+        writer = SummaryWriter(log_dir=log_dir)
+    return writer
+
+def log_scalar(tag, value, step):
+    if writer:
+        writer.add_scalar(tag, value, step)
 
 class Flatten:
     def __call__(self, x):
@@ -35,10 +70,10 @@ class Flatten:
         current_batch = self.shape[0]
         flatten_dim = numel // current_batch
         
-        # DEBUG:
-        if not hasattr(self, "printed"):
-            print(f"DEBUG: Flatten shape: {self.shape} -> [Batch={current_batch}, Dim={flatten_dim}]")
-            self.printed = True
+        # DEBUG (已注释):
+        # if not hasattr(self, "printed"):
+        #     print(f"DEBUG: Flatten shape: {self.shape} -> [Batch={current_batch}, Dim={flatten_dim}]")
+        #     self.printed = True
         
         # 执行 Reshape
         if isinstance(d, my_deep_lib.Tensor):
@@ -74,12 +109,12 @@ class CNN(Module):
     def __init__(self):
         super().__init__()
         # Conv1: 3 -> 32
-        self.conv1 = Conv2D(3, 32, 3, padding=1)
+        self.conv1 = Conv2D(3, 32, 3, padding=1, bias=False)
         self.relu1 = ReLU()
         self.pool1 = MaxPool2D(2, 2)
         
         # Conv2: 32 -> 64
-        self.conv2 = Conv2D(32, 64, 3, padding=1)
+        self.conv2 = Conv2D(32, 64, 3, padding=1, bias=False)
         self.relu2 = ReLU()
         self.pool2 = MaxPool2D(2, 2)
         
@@ -96,20 +131,33 @@ class CNN(Module):
         return self.fc2(x)
 
 def main():
+    config = {"model_name": "SimpleCNN", "batch_size": 64, "epochs": 20, "lr": 0.001}
+    
+    # 创建日志目录
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_dir = f"./logs/{config['model_name']}_{timestamp}"
+    os.makedirs(log_dir, exist_ok=True)
+    
+    init_tensorboard(log_dir)
+    setup_logging(log_dir)
+    
+    with open(os.path.join(log_dir, 'config.json'), 'w') as f:
+        json.dump(config, f, indent=2)
+    
+    print(f"Log directory: {log_dir}")
     print("Loading data...")
+    
     if not os.path.exists('./data'):
         os.makedirs('./data')
         
     train_ds = CIFAR10Dataset('./data', train=True)
     test_ds = CIFAR10Dataset('./data', train=False)
     
-    # 稍微调小 batch_size
-    train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
-    test_loader = DataLoader(test_ds, batch_size=64, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=config["batch_size"], shuffle=True)
+    test_loader = DataLoader(test_ds, batch_size=config["batch_size"], shuffle=False)
     
     model = CNN()
     
-    # 计算参数量
     total_params = 0
     for p in model.parameters():
         d = p.cached_data
@@ -118,22 +166,23 @@ def main():
         else:
             total_params += d.size
     print(f"Parameters: {total_params:,}")
+    if logger:
+        logger.info(f"Model: {config['model_name']}, Params: {total_params:,}")
     
-    opt = SGD(model.parameters(), lr=0.001, momentum=0.9)
+    opt = SGD(model.parameters(), lr=config["lr"], momentum=0.9)
     
     print("Training...")
+    history = {"train_loss": [], "train_acc": [], "test_acc": []}
+    best_test_acc = 0.0
     
-    for epoch in range(10):
+    for epoch in range(config["epochs"]):
         t0 = time.time()
         total_loss, correct, total = 0.0, 0, 0
         
         for i, (data, labels) in enumerate(train_loader):
+            if data.shape[-1] == 3:
+                data = data.transpose(0, 3, 1, 2)
 
-            if data.shape[-1] == 3: # 检测是否为 Channel Last
-                data = data.transpose(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
-    
-
-            # Numpy -> GPU Tensor
             gpu_data = my_deep_lib.Tensor.from_numpy(data, my_deep_lib.Device.gpu(0))
             gpu_labels = my_deep_lib.Tensor.from_numpy(labels.astype(np.float32), my_deep_lib.Device.gpu(0))
 
@@ -148,46 +197,96 @@ def main():
             opt.step()
             
             loss_val = loss.realize_cached_data()
-            if hasattr(loss_val, "to_numpy"):
-                loss_scalar = float(loss_val.to_numpy())
-            else:
-                loss_scalar = float(loss_val)
+            loss_scalar = float(loss_val.to_numpy()) if hasattr(loss_val, "to_numpy") else float(loss_val)
             total_loss += loss_scalar
             
             logits_data = logits.realize_cached_data()
-            if hasattr(logits_data, "to_numpy"):
-                logits_np = logits_data.to_numpy()
-                labels_np = labels 
-            else:
-                logits_np = logits_data
-                labels_np = labels
+            logits_np = logits_data.to_numpy() if hasattr(logits_data, "to_numpy") else logits_data
                 
             pred = logits_np.argmax(axis=1)
-            correct += (pred == labels_np).sum()
+            correct += (pred == labels).sum()
             total += len(labels)
             
-            if (i+1) % 10 == 0:
+            if (i+1) % 50 == 0:
                 print(f"  Batch {i+1}/{len(train_loader)}, Loss: {total_loss/(i+1):.4f}, Acc: {100*correct/total:.2f}%")
         
+        # 评估
         test_correct, test_total = 0, 0
         for data, labels in test_loader:
+            if data.shape[-1] == 3:
+                data = data.transpose(0, 3, 1, 2)
             gpu_data = my_deep_lib.Tensor.from_numpy(data, my_deep_lib.Device.gpu(0))
             x = Value(); x._init(None, [], cached_data=gpu_data)
             
             logits = model(x)
             logits_data = logits.realize_cached_data()
-            if hasattr(logits_data, "to_numpy"):
-                logits_np = logits_data.to_numpy()
-            else:
-                logits_np = logits_data
+            logits_np = logits_data.to_numpy() if hasattr(logits_data, "to_numpy") else logits_data
                 
             pred = logits_np.argmax(axis=1)
             test_correct += (pred == labels).sum()
             test_total += len(labels)
         
-        print(f"Epoch {epoch+1}: Loss={total_loss/len(train_loader):.4f}, "
-              f"Train Acc={100*correct/total:.2f}%, Test Acc={100*test_correct/test_total:.2f}%, "
-              f"Time={time.time()-t0:.1f}s")
+        train_loss = total_loss / len(train_loader)
+        train_acc = correct / total
+        test_acc = test_correct / test_total
+        epoch_time = time.time() - t0
+        
+        # 记录历史
+        history["train_loss"].append(train_loss)
+        history["train_acc"].append(train_acc)
+        history["test_acc"].append(test_acc)
+        
+        if test_acc > best_test_acc:
+            best_test_acc = test_acc
+        
+        print(f"Epoch {epoch+1}: Loss={train_loss:.4f}, "
+              f"Train Acc={100*train_acc:.2f}%, Test Acc={100*test_acc:.2f}%, Time={epoch_time:.1f}s")
+        
+        # TensorBoard
+        log_scalar("train/loss", train_loss, epoch + 1)
+        log_scalar("train/accuracy", train_acc, epoch + 1)
+        log_scalar("test/accuracy", test_acc, epoch + 1)
+        
+        if logger:
+            logger.info(f"Epoch {epoch+1}: Loss={train_loss:.4f}, TrainAcc={100*train_acc:.2f}%, TestAcc={100*test_acc:.2f}%")
+    
+    # 保存结果
+    print(f"\nBest Test Accuracy: {100*best_test_acc:.2f}%")
+    
+    with open(os.path.join(log_dir, 'history.json'), 'w') as f:
+        json.dump(history, f, indent=2)
+    
+    if logger:
+        logger.info(f"Training completed! Best Test Acc: {100*best_test_acc:.2f}%")
+    
+    if writer:
+        writer.close()
+    
+    # 保存曲线图
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+        epochs = range(1, len(history["train_loss"]) + 1)
+        
+        axes[0].plot(epochs, history["train_loss"], 'b-', linewidth=2)
+        axes[0].set_xlabel('Epoch'); axes[0].set_ylabel('Loss'); axes[0].set_title('Training Loss'); axes[0].grid(True, alpha=0.3)
+        
+        axes[1].plot(epochs, [a*100 for a in history["train_acc"]], 'b-', linewidth=2, label='Train')
+        axes[1].plot(epochs, [a*100 for a in history["test_acc"]], 'r-', linewidth=2, label='Test')
+        axes[1].set_xlabel('Epoch'); axes[1].set_ylabel('Accuracy (%)'); axes[1].set_title('Accuracy'); axes[1].legend(); axes[1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(log_dir, 'training_curves.png'), dpi=150)
+        plt.close()
+        print(f"Curves saved to: {log_dir}/training_curves.png")
+    except ImportError:
+        pass
+    
+    print(f"\nAll logs saved to: {log_dir}")
+    print("To view TensorBoard: tensorboard --logdir=./logs")
 
 if __name__ == "__main__":
     main()

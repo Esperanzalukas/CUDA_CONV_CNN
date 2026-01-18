@@ -1,7 +1,7 @@
 import numpy as np
 import my_deep_lib as cuda
 from .module import Module
-from basic_operator import Op, Value, as_value
+from core.basic_operator import Op, Value, as_value
 
 # === ReLU ===
 class ReLUOp(Op):

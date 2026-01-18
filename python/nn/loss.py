@@ -1,6 +1,6 @@
 import numpy as np
 import my_deep_lib as cuda
-from basic_operator import Op, Value
+from core.basic_operator import Op, Value
 
 class CrossEntropyOp(Op):
     def compute(self, logits, labels):

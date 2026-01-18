@@ -1,6 +1,6 @@
 import my_deep_lib as cuda
 from .module import Module
-from basic_operator import Op, Value
+from core.basic_operator import Op, Value
 
 class MaxPool2DOp(Op):
     def __init__(self, kernel_size, stride):

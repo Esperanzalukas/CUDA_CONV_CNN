@@ -21,7 +21,7 @@ find_package(pybind11 CONFIG REQUIRED)
 
 # CUDA 架构设置（根据你的 GPU 调整）
 # RTX 40xx: 89, RTX 30xx: 86, RTX 20xx: 75, GTX 10xx: 61
-set(CMAKE_CUDA_ARCHITECTURES 75 86)
+set(CMAKE_CUDA_ARCHITECTURES 75 86 89)
 
 # 头文件目录
 include_directories(

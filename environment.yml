@@ -1,0 +1,31 @@
+name: cuda_conv_cnn
+channels:
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  # Core build tools
+  - cmake>=3.18
+  - ninja
+  - make
+  
+  # CUDA Toolkit (包含 nvcc, cudart, cublas)
+  - cuda-toolkit=12.4
+  - cuda-nvcc
+  - cuda-cudart-dev
+  - libcublas-dev
+  
+  # Python environment
+  - python=3.10
+  - numpy>=1.24
+  - pybind11>=2.11
+  
+  # 数据处理和可视化
+  - pip
+  - pip:
+    - tqdm
+    - matplotlib
+    - pillow
+    - torch
+    - torchvision
+    - tensorboard

@@ -4,7 +4,7 @@
 import numpy as np
 from typing import Tuple
 import my_deep_lib as cuda_lib
-from basic_operator import Op, Value
+from core.basic_operator import Op, Value
 
 class ReLUOp(Op):
     """ReLU 激活函数"""
