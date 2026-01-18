@@ -1,0 +1,20 @@
+# 创建 .gitignore 文件
+cat <<EOF > .gitignore
+# Python
+__pycache__/
+*.py[cod]
+
+# C++/CUDA build files
+*.o
+*.so
+build/
+
+# Dataset (通常不上传大文件)
+data/
+
+# VS Code
+.vscode/
+
+# OS generated
+.DS_Store
+EOF

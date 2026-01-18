@@ -1,0 +1,1824 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project>
+
+  <!-- 项目元数据 -->
+  <metadata>
+    <name>deep_learning</name>
+    <path>/home/lukas/aicoding/deep_learning</path>
+    <export_time>2026-01-17T17:48:22.618391</export_time>
+    <total_files>21</total_files>
+    <total_size_bytes>50921</total_size_bytes>
+    <total_size_mb>0.05</total_size_mb>
+    <file_types>
+      <type extension=".py" count="15"/>
+      <type extension=".h" count="5"/>
+      <type extension=".cpp" count="1"/>
+    </file_types>
+  </metadata>
+
+  <!-- 目录结构 -->
+  <directory_structure>
+    <tree><![CDATA[
+deep_learning/
+├── cuda_src/
+│   ├── activations.cu
+│   ├── activations.h
+│   ├── conv_layer.cu
+│   ├── conv_layer.h
+│   ├── elementwise.cu
+│   ├── elementwisew.h
+│   ├── layers.cu
+│   ├── layers.h
+│   ├── tensor.cu
+│   └── tensor.h
+├── models/
+│   └── simple_cnn.py
+├── pybind/
+│   └── pybind_wrapper.cpp
+├── python/
+│   ├── core/
+│   │   └── device.py
+│   ├── cuda_ops/
+│   │   ├── __init__.py
+│   │   ├── activations.py
+│   │   ├── conv.py
+│   │   ├── linear.py
+│   │   └── pooling.py
+│   ├── data/
+│   ├── nn/
+│   │   ├── __init__.py
+│   │   ├── activations.py
+│   │   ├── conv.py
+│   │   ├── linear.py
+│   │   ├── loss.py
+│   │   └── module.py
+│   ├── optim/
+│   └── utils.py
+├── train/
+└── packer.py
+    ]]></tree>
+  </directory_structure>
+
+  <!-- 源代码文件 -->
+  <files>
+
+    <file index="1">
+      <path>cuda_src/activations.h</path>
+      <name>activations.h</name>
+      <extension>.h</extension>
+      <size_bytes>259</size_bytes>
+      <modified>2026-01-17T17:15:49.590450</modified>
+      <encoding>utf-8</encoding>
+      <lines>10</lines>
+      <content><![CDATA[
+#pragma once
+#include "tensor.h"
+
+// ReLU
+Tensor relu_forward(const Tensor& x);
+Tensor relu_backward(const Tensor& x, const Tensor& grad_y); 
+
+// Sigmoid
+Tensor sigmoid_forward(const Tensor& x);
+Tensor sigmoid_backward(const Tensor& y, const Tensor& grad_y); 
+]]></content>
+    </file>
+
+    <file index="2">
+      <path>cuda_src/conv_layer.h</path>
+      <name>conv_layer.h</name>
+      <extension>.h</extension>
+      <size_bytes>831</size_bytes>
+      <modified>2026-01-17T17:16:31.582447</modified>
+      <encoding>utf-8</encoding>
+      <lines>22</lines>
+      <content><![CDATA[
+#ifndef CONV_LAYER_H
+#define CONV_LAYER_H
+
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+
+// 前向传播
+// input: [batch, in_c, h, w]
+// output: [batch, out_c, h_out, w_out]
+void forward_conv(float* d_input, float* d_output, float* d_weight, float* d_col_buffer,
+                  int batch_size, int in_channels, int out_channels, 
+                  int height, int width, int ksize, int stride, int padding,
+                  cublasHandle_t handle);
+
+// 反向传播
+void backward_conv(float* d_input, float* d_grad_output, float* d_weight, 
+                   float* d_col_buffer, float* d_grad_input, float* d_grad_weight,
+                   int batch_size, int in_channels, int out_channels, 
+                   int height, int width, int ksize, int stride, int padding,
+                   cublasHandle_t handle);
+
+#endif
+]]></content>
+    </file>
+
+    <file index="3">
+      <path>cuda_src/elementwisew.h</path>
+      <name>elementwisew.h</name>
+      <extension>.h</extension>
+      <size_bytes>187</size_bytes>
+      <modified>2026-01-17T17:19:31.958399</modified>
+      <encoding>utf-8</encoding>
+      <lines>5</lines>
+      <content><![CDATA[
+#pragma once
+#include "tensor.h"
+
+void elementwise_add(const Tensor& a, const Tensor& b, Tensor& c);
+void elementwise_add_backward(const Tensor& grad_out, Tensor& grad_a, Tensor& grad_b);
+]]></content>
+    </file>
+
+    <file index="4">
+      <path>cuda_src/layers.h</path>
+      <name>layers.h</name>
+      <extension>.h</extension>
+      <size_bytes>1464</size_bytes>
+      <modified>2026-01-17T17:15:27.402457</modified>
+      <encoding>utf-8</encoding>
+      <lines>34</lines>
+      <content><![CDATA[
+#pragma once
+#include "tensor.h"
+
+// 1. Activation: Sigmoid
+void sigmoid_forward(const Tensor& input, Tensor& output);
+// Sigmoid Backward: grad_input = grad_output * y * (1-y)
+void sigmoid_backward(const Tensor& output, const Tensor& grad_output, Tensor& grad_input);
+
+// 2. Activation: ReLU
+void relu_forward(const Tensor& input, Tensor& output);
+void relu_backward(const Tensor& input, const Tensor& grad_output, Tensor& grad_input);
+
+// 3. Linear (Fully Connected)
+// Y = X * W^T + b
+void linear_forward(const Tensor& input, const Tensor& weight, const Tensor& bias, Tensor& output);
+// Linear Backward involves computing dX, dW, db
+void linear_backward(const Tensor& input, const Tensor& weight, const Tensor& grad_output, 
+                     Tensor& grad_input, Tensor& grad_weight, Tensor& grad_bias);
+
+// 4. Convolution
+void conv2d_forward(const Tensor& input, const Tensor& weight, Tensor& output, int stride, int padding);
+
+// 5. Max Pooling
+void maxpool_forward(const Tensor& input, Tensor& output, Tensor& mask, 
+                     int k, int s, int p);
+void maxpool_backward(const Tensor& grad_output, const Tensor& mask, Tensor& grad_input, 
+                      int k, int s, int p);
+
+// 6. Softmax
+void softmax_forward(const Tensor& input, Tensor& output);
+
+// 7. Cross Entropy Loss
+float cross_entropy_loss(const Tensor& probs, const Tensor& labels);
+void cross_entropy_backward(const Tensor& probs, const Tensor& labels, Tensor& grad_input);
+]]></content>
+    </file>
+
+    <file index="5">
+      <path>cuda_src/tensor.h</path>
+      <name>tensor.h</name>
+      <extension>.h</extension>
+      <size_bytes>1204</size_bytes>
+      <modified>2026-01-17T17:15:30.718455</modified>
+      <encoding>utf-8</encoding>
+      <lines>50</lines>
+      <content><![CDATA[
+#pragma once
+#include <vector>
+#include <memory>
+#include <cstdint>
+#include <stdexcept>
+
+enum class DeviceType { CPU, GPU };
+
+struct Device {
+    DeviceType type;
+    int index;
+
+    Device() : type(DeviceType::CPU), index(0) {} 
+
+    Device(DeviceType t, int i = 0) : type(t), index(i) {}
+    static Device cpu() { return Device(DeviceType::CPU); }
+    static Device gpu(int i = 0) { return Device(DeviceType::GPU, i); }
+};
+
+class Tensor {
+public:
+    Tensor(const std::vector<int64_t>& shape, Device device);
+    ~Tensor();
+    
+    Tensor(Tensor&& other) noexcept;
+    Tensor& operator=(Tensor&& other) noexcept;
+    Tensor(const Tensor&) = delete;
+    Tensor& operator=(const Tensor&) = delete;
+
+    void fill(float v);
+    Tensor cpu() const;
+    Tensor gpu(int idx = 0) const;
+    
+    float* data();
+    const float* data() const;
+    
+    const std::vector<int64_t>& shape() const { return shape_; }
+    int64_t numel() const { return numel_; }
+    const Device& device() const { return device_; }
+
+private:
+    void allocate();
+    void deallocate();
+    void copy_to(Tensor& dst) const;
+
+    std::vector<int64_t> shape_;
+    int64_t numel_;
+    Device device_;
+    void* storage_ = nullptr;
+};
+]]></content>
+    </file>
+
+    <file index="6">
+      <path>models/simple_cnn.py</path>
+      <name>simple_cnn.py</name>
+      <extension>.py</extension>
+      <size_bytes>3700</size_bytes>
+      <modified>2026-01-17T17:41:00.518047</modified>
+      <encoding>utf-8</encoding>
+      <lines>112</lines>
+      <content><![CDATA[
+"""
+简单的 CNN 模型（用于 CIFAR-10）
+
+架构：
+Conv(3->32) -> ReLU -> MaxPool -> Conv(32->64) -> ReLU -> MaxPool -> Flatten -> Linear(64*8*8->512) -> ReLU -> Linear(512->10)
+"""
+import numpy as np
+from nn.module import Module, Parameter
+from nn.conv import Conv2D, MaxPool2D
+from nn.linear import Linear
+from nn.activations import ReLU
+from basic_operator import Value
+
+class SimpleCNN(Module):
+    """
+    简单的卷积神经网络
+    
+    输入：[batch, 3, 32, 32] (CIFAR-10 图像)
+    输出：[batch, 10] (10 个类别的 logits)
+    """
+    def __init__(self, num_classes=10):
+        super().__init__()
+        
+        # 第一层卷积块：3 -> 32 channels
+        self.conv1 = Conv2D(in_channels=3, out_channels=32, 
+                           kernel_size=3, stride=1, padding=1)
+        self.relu1 = ReLU()
+        self.pool1 = MaxPool2D(kernel_size=2, stride=2)  # 32x32 -> 16x16
+        
+        # 第二层卷积块：32 -> 64 channels
+        self.conv2 = Conv2D(in_channels=32, out_channels=64,
+                           kernel_size=3, stride=1, padding=1)
+        self.relu2 = ReLU()
+        self.pool2 = MaxPool2D(kernel_size=2, stride=2)  # 16x16 -> 8x8
+        
+        # 全连接层
+        self.fc1 = Linear(in_features=64 * 8 * 8, out_features=512)
+        self.relu3 = ReLU()
+        self.fc2 = Linear(in_features=512, out_features=num_classes)
+    
+    def forward(self, x: Value) -> Value:
+        """
+        前向传播
+        
+        Args:
+            x: [batch, 3, 32, 32]
+        
+        Returns:
+            logits: [batch, num_classes]
+        """
+        # 第一个卷积块
+        x = self.conv1(x)       # [batch, 32, 32, 32]
+        x = self.relu1(x)
+        x = self.pool1(x)       # [batch, 32, 16, 16]
+        
+        # 第二个卷积块
+        x = self.conv2(x)       # [batch, 64, 16, 16]
+        x = self.relu2(x)
+        x = self.pool2(x)       # [batch, 64, 8, 8]
+        
+        # Flatten
+        x_data = x.realize_cached_data()
+        batch_size = x_data.shape[0]
+        flattened = x_data.reshape(batch_size, -1)  # [batch, 64*8*8]
+        x = Value.make_const(flattened, requires_grad=x.requires_grad)
+        x._init(x.op, x.inputs, cached_data=flattened, requires_grad=x.requires_grad)
+        
+        # 全连接层
+        x = self.fc1(x)         # [batch, 512]
+        x = self.relu3(x)
+        x = self.fc2(x)         # [batch, 10]
+        
+        return x
+
+# 简化版（更小的模型，训练更快）
+class TinyCNN(Module):
+    """
+    更小的 CNN（用于快速测试）
+    
+    Conv(3->16) -> ReLU -> MaxPool -> Conv(16->32) -> ReLU -> MaxPool -> Linear(32*8*8->10)
+    """
+    def __init__(self, num_classes=10):
+        super().__init__()
+        
+        self.conv1 = Conv2D(3, 16, kernel_size=3, stride=1, padding=1)
+        self.relu1 = ReLU()
+        self.pool1 = MaxPool2D(kernel_size=2, stride=2)
+        
+        self.conv2 = Conv2D(16, 32, kernel_size=3, stride=1, padding=1)
+        self.relu2 = ReLU()
+        self.pool2 = MaxPool2D(kernel_size=2, stride=2)
+        
+        self.fc = Linear(32 * 8 * 8, num_classes)
+    
+    def forward(self, x: Value) -> Value:
+        x = self.conv1(x)
+        x = self.relu1(x)
+        x = self.pool1(x)
+        
+        x = self.conv2(x)
+        x = self.relu2(x)
+        x = self.pool2(x)
+        
+        # Flatten
+        x_data = x.realize_cached_data()
+        batch_size = x_data.shape[0]
+        flattened = x_data.reshape(batch_size, -1)
+        x = Value.make_const(flattened, requires_grad=x.requires_grad)
+        x._init(x.op, x.inputs, cached_data=flattened, requires_grad=x.requires_grad)
+        
+        x = self.fc(x)
+        return x
+]]></content>
+    </file>
+
+    <file index="7">
+      <path>packer.py</path>
+      <name>packer.py</name>
+      <extension>.py</extension>
+      <size_bytes>11037</size_bytes>
+      <modified>2026-01-17T17:47:59.889936</modified>
+      <encoding>utf-8</encoding>
+      <lines>333</lines>
+      <content><![CDATA[
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+项目代码导出脚本 - XML格式（LLM优化版）
+"""
+
+import os
+from pathlib import Path
+from datetime import datetime
+import xml.sax.saxutils as saxutils
+
+# ==================== 配置区域 ====================
+OUTPUT_FILENAME = "project_export.xml"
+
+# 包含的文件扩展名
+INCLUDE_EXTENSIONS = {
+    '.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.c', '.cpp', '.h', '.hpp',
+    '.cs', '.go', '.rs', '.php', '.rb', '.swift', '.kt', '.scala',
+    '.html', '.css', '.scss', '.sass', '.less', '.vue', '.svelte',
+    '.json', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
+    '.md', '.txt', '.rst', '.sh', '.bash', '.sql', '.r', '.dart',
+    '.gradle', '.properties', '.env', '.dockerfile'
+}
+
+# 排除的文件夹
+EXCLUDE_DIRS = {
+    'node_modules', 'venv', 'env', '.venv', '.env',
+    '.git', '.svn', '.hg', '__pycache__', '.pytest_cache',
+    'dist', 'build', 'target', 'out', 'output',
+    '.idea', '.vscode', '.vs', '.settings',
+    'bin', 'obj', 'pkg', 'vendor',
+    '.next', '.nuxt', 'coverage', '.nyc_output',
+    '.gradle', '.cache', '.mypy_cache', '.tox'
+}
+
+# 排除的文件
+EXCLUDE_FILES = {
+    '.DS_Store', 'Thumbs.db', 'desktop.ini',
+    '.gitignore', '.gitkeep', '.dockerignore',
+    OUTPUT_FILENAME,
+    'package-lock.json', 'yarn.lock', 'poetry.lock', 'Pipfile.lock'
+}
+
+# 无扩展名但需要包含的特殊文件
+SPECIAL_FILES = {
+    'Makefile', 'Dockerfile', 'Rakefile', 'Gemfile', 
+    'Procfile', 'Vagrantfile', 'Jenkinsfile'
+}
+
+
+def xml_escape(text):
+    """XML转义，处理特殊字符"""
+    if text is None:
+        return ""
+    return saxutils.escape(str(text))
+
+
+def should_include_file(file_path):
+    """判断文件是否应该被包含"""
+    file_path = Path(file_path)
+    
+    # 排除特定文件
+    if file_path.name in EXCLUDE_FILES:
+        return False
+    
+    # 包含特殊文件
+    if file_path.name in SPECIAL_FILES:
+        return True
+    
+    # 检查扩展名
+    return file_path.suffix.lower() in INCLUDE_EXTENSIONS
+
+
+def generate_tree_node(path, prefix="", is_last=True, parent_chain=None):
+    """
+    递归生成目录树的XML节点
+    
+    Args:
+        path: 当前路径
+        prefix: 显示用的前缀（用于树形结构）
+        is_last: 是否是同级最后一个
+        parent_chain: 父路径链（用于检测循环）
+    
+    Returns:
+        (tree_lines, file_nodes) - 树形结构行列表和文件节点列表
+    """
+    if parent_chain is None:
+        parent_chain = set()
+    
+    # 防止循环引用（符号链接）
+    try:
+        real_path = path.resolve()
+        if real_path in parent_chain:
+            return [], []
+    except (OSError, RuntimeError):
+        return [], []
+    
+    tree_lines = []
+    file_nodes = []
+    
+    # 读取目录内容
+    try:
+        items = list(path.iterdir())
+    except PermissionError:
+        return [f"{prefix}[Permission Denied]"], []
+    except Exception as e:
+        return [f"{prefix}[Error: {str(e)}]"], []
+    
+    # 过滤并排序：文件夹在前，然后按名称排序
+    items = [
+        item for item in items
+        if item.name not in EXCLUDE_DIRS and item.name not in EXCLUDE_FILES
+    ]
+    items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))
+    
+    # 更新父路径链
+    new_chain = parent_chain | {real_path}
+    
+    # 遍历所有项目
+    for index, item in enumerate(items):
+        is_last_item = (index == len(items) - 1)
+        connector = "└── " if is_last_item else "├── "
+        
+        if item.is_dir():
+            # 处理文件夹
+            tree_lines.append(f"{prefix}{connector}{item.name}/")
+            
+            # 递归处理子目录
+            extension = "    " if is_last_item else "│   "
+            sub_tree, sub_files = generate_tree_node(
+                item, 
+                prefix + extension, 
+                is_last_item,
+                new_chain
+            )
+            tree_lines.extend(sub_tree)
+            file_nodes.extend(sub_files)
+        else:
+            # 处理文件
+            tree_lines.append(f"{prefix}{connector}{item.name}")
+            
+            # 如果是需要包含的代码文件，添加到文件列表
+            if should_include_file(item):
+                file_nodes.append(item)
+    
+    return tree_lines, file_nodes
+
+
+def read_file_content(file_path):
+    """
+    读取文件内容，尝试多种编码
+    
+    Returns:
+        (content, encoding, error) - 文件内容、使用的编码、错误信息
+    """
+    encodings = ['utf-8', 'utf-8-sig', 'gbk', 'gb2312', 'gb18030', 'latin-1', 'cp1252']
+    
+    for encoding in encodings:
+        try:
+            with open(file_path, 'r', encoding=encoding) as f:
+                content = f.read()
+                return content, encoding, None
+        except UnicodeDecodeError:
+            continue
+        except Exception as e:
+            return None, None, f"Read error: {str(e)}"
+    
+    return None, None, "Cannot decode with any known encoding"
+
+
+def get_file_info(file_path, root_path):
+    """获取文件的详细信息"""
+    try:
+        stat = file_path.stat()
+        relative_path = file_path.relative_to(root_path)
+        
+        return {
+            'path': str(relative_path),
+            'name': file_path.name,
+            'extension': file_path.suffix or 'none',
+            'size': stat.st_size,
+            'modified': datetime.fromtimestamp(stat.st_mtime).isoformat()
+        }
+    except Exception as e:
+        return None
+
+
+def export_project_xml(root_path=None, output_file=None):
+    """
+    导出项目为XML格式
+    
+    Args:
+        root_path: 项目根路径（默认当前目录）
+        output_file: 输出文件名
+    """
+    if root_path is None:
+        root_path = os.getcwd()
+    
+    if output_file is None:
+        output_file = OUTPUT_FILENAME
+    
+    root = Path(root_path).resolve()
+    output_path = root / output_file
+    
+    print(f"=" * 60)
+    print(f"项目代码导出 - XML格式")
+    print(f"=" * 60)
+    print(f"项目路径: {root}")
+    print(f"输出文件: {output_path}")
+    print(f"=" * 60)
+    
+    # 生成目录树和收集文件
+    print("\n[1/3] 扫描项目结构...")
+    tree_lines, code_files = generate_tree_node(root)
+    
+    # 按路径排序文件
+    code_files.sort(key=lambda x: str(x.relative_to(root)).lower())
+    
+    print(f"✓ 找到 {len(code_files)} 个代码文件")
+    
+    # 统计文件类型
+    stats = {}
+    total_size = 0
+    for file_path in code_files:
+        ext = file_path.suffix or 'no_extension'
+        stats[ext] = stats.get(ext, 0) + 1
+        try:
+            total_size += file_path.stat().st_size
+        except:
+            pass
+    
+    # 写入XML文件
+    print(f"\n[2/3] 生成XML文档...")
+    
+    with open(output_path, 'w', encoding='utf-8') as out:
+        # XML头部
+        out.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        out.write('<project>\n\n')
+        
+        # ============ 元数据部分 ============
+        out.write('  <!-- 项目元数据 -->\n')
+        out.write('  <metadata>\n')
+        out.write(f'    <name>{xml_escape(root.name)}</name>\n')
+        out.write(f'    <path>{xml_escape(str(root))}</path>\n')
+        out.write(f'    <export_time>{datetime.now().isoformat()}</export_time>\n')
+        out.write(f'    <total_files>{len(code_files)}</total_files>\n')
+        out.write(f'    <total_size_bytes>{total_size}</total_size_bytes>\n')
+        out.write(f'    <total_size_mb>{total_size / (1024 * 1024):.2f}</total_size_mb>\n')
+        out.write('    <file_types>\n')
+        
+        for ext, count in sorted(stats.items(), key=lambda x: (-x[1], x[0])):
+            out.write(f'      <type extension="{xml_escape(ext)}" count="{count}"/>\n')
+        
+        out.write('    </file_types>\n')
+        out.write('  </metadata>\n\n')
+        
+        # ============ 目录结构部分 ============
+        out.write('  <!-- 目录结构 -->\n')
+        out.write('  <directory_structure>\n')
+        out.write('    <tree><![CDATA[\n')
+        out.write(f'{root.name}/\n')
+        out.write('\n'.join(tree_lines))
+        out.write('\n    ]]></tree>\n')
+        out.write('  </directory_structure>\n\n')
+        
+        # ============ 文件内容部分 ============
+        out.write('  <!-- 源代码文件 -->\n')
+        out.write('  <files>\n')
+        
+        print(f"\n[3/3] 读取文件内容...")
+        
+        for index, file_path in enumerate(code_files, 1):
+            relative_path = file_path.relative_to(root)
+            print(f"  [{index}/{len(code_files)}] {relative_path}")
+            
+            # 获取文件信息
+            file_info = get_file_info(file_path, root)
+            if not file_info:
+                print(f"    ⚠ 无法获取文件信息")
+                continue
+            
+            # 读取文件内容
+            content, encoding, error = read_file_content(file_path)
+            
+            # 写入文件节点
+            out.write(f'\n    <file index="{index}">\n')
+            out.write(f'      <path>{xml_escape(file_info["path"])}</path>\n')
+            out.write(f'      <name>{xml_escape(file_info["name"])}</name>\n')
+            out.write(f'      <extension>{xml_escape(file_info["extension"])}</extension>\n')
+            out.write(f'      <size_bytes>{file_info["size"]}</size_bytes>\n')
+            out.write(f'      <modified>{file_info["modified"]}</modified>\n')
+            
+            if error:
+                out.write(f'      <error>{xml_escape(error)}</error>\n')
+                out.write('      <content/>\n')
+                print(f"    ⚠ 读取失败: {error}")
+            else:
+                out.write(f'      <encoding>{encoding}</encoding>\n')
+                out.write(f'      <lines>{len(content.splitlines())}</lines>\n')
+                out.write('      <content><![CDATA[\n')
+                out.write(content)
+                if not content.endswith('\n'):
+                    out.write('\n')
+                out.write(']]></content>\n')
+            
+            out.write('    </file>\n')
+        
+        out.write('\n  </files>\n\n')
+        out.write('</project>\n')
+    
+    # 输出统计信息
+    print(f"\n{'=' * 60}")
+    print(f"✓ 导出完成!")
+    print(f"{'=' * 60}")
+    print(f"输出文件: {output_path}")
+    print(f"文件大小: {output_path.stat().st_size / 1024:.2f} KB")
+    print(f"总计文件: {len(code_files)} 个")
+    print(f"代码总量: {total_size / 1024:.2f} KB")
+    print(f"\n文件类型统计:")
+    for ext, count in sorted(stats.items(), key=lambda x: (-x[1], x[0]))[:10]:
+        print(f"  {ext:15s} : {count:3d} 个")
+    print(f"{'=' * 60}\n")
+
+
+if __name__ == "__main__":
+    # 导出当前目录
+    export_project_xml()
+    
+    # 或指定其他目录
+    # export_project_xml(root_path="/path/to/your/project")
+    
+    # 或指定输出文件名
+    # export_project_xml(output_file="my_project.xml")
+]]></content>
+    </file>
+
+    <file index="8">
+      <path>pybind/pybind_wrapper.cpp</path>
+      <name>pybind_wrapper.cpp</name>
+      <extension>.cpp</extension>
+      <size_bytes>6628</size_bytes>
+      <modified>2026-01-17T17:29:00.482236</modified>
+      <encoding>utf-8</encoding>
+      <lines>183</lines>
+      <content><![CDATA[
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#include <pybind11/numpy.h> 
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include <cstring>
+#include <vector>
+#include <stdexcept>
+
+#include "tensor.h"
+#include "layers.h"
+#include "conv_layer.h"  
+#include "elementwise.h"
+
+namespace py = pybind11;
+
+// 辅助函数：从 numpy array 创建 Tensor
+Tensor from_numpy(py::array_t<float> array, Device device) {
+    py::buffer_info buf = array.request();
+    
+    std::vector<int64_t> shape;
+    for (auto s : buf.shape) {
+        shape.push_back(static_cast<int64_t>(s));
+    }
+    
+    Tensor t(shape, device);
+    
+    if (device.type == DeviceType::CPU) {
+        std::memcpy(t.data(), buf.ptr, buf.size * sizeof(float));
+    } else {
+        cudaMemcpy(t.data(), buf.ptr, buf.size * sizeof(float), cudaMemcpyHostToDevice);
+    }
+    return t;
+}
+
+// 辅助函数：Tensor 转 Numpy
+py::array_t<float> to_numpy(const Tensor& t) {
+    std::vector<int64_t> shape = t.shape();
+    std::vector<ssize_t> strides;
+    ssize_t stride = sizeof(float);
+    
+    for (int i = shape.size() - 1; i >= 0; --i) {
+        strides.insert(strides.begin(), stride);
+        stride *= shape[i];
+    }
+
+    py::array_t<float> result(shape, strides);
+    py::buffer_info buf = result.request();
+
+    Tensor cpu_t = t.cpu(); 
+    std::memcpy(buf.ptr, cpu_t.data(), cpu_t.numel() * sizeof(float));
+    
+    return result;
+}
+
+PYBIND11_MODULE(my_deep_lib, m) {
+    m.doc() = "Deep Learning Library with CUDA Backend";
+
+    // 1. 绑定枚举
+    py::enum_<DeviceType>(m, "DeviceType")
+        .value("CPU", DeviceType::CPU)
+        .value("GPU", DeviceType::GPU)
+        .export_values();
+
+    // 2. 绑定 Device 类
+    py::class_<Device>(m, "Device")
+        .def(py::init<DeviceType, int>(), py::arg("type"), py::arg("index")=0)
+        .def_static("cpu", &Device::cpu)
+        .def_static("gpu", &Device::gpu)
+        .def_readonly("type", &Device::type)
+        .def_readonly("index", &Device::index);
+
+    // 3. 绑定 Tensor 类
+    py::class_<Tensor>(m, "Tensor")
+        .def(py::init<const std::vector<int64_t>&, Device>())
+        .def_static("from_numpy", &from_numpy)
+        .def("to_numpy", &to_numpy)
+        .def("fill", &Tensor::fill)
+        .def("shape", &Tensor::shape)
+        .def("numel", &Tensor::numel)
+        .def("cpu", &Tensor::cpu)
+        .def("gpu", &Tensor::gpu, py::arg("index")=0);
+
+    // 4. 激活函数
+    m.def("sigmoid_forward", &sigmoid_forward, 
+          "Sigmoid forward pass");
+    m.def("sigmoid_backward", &sigmoid_backward,
+          "Sigmoid backward pass");
+    
+    m.def("relu_forward", &relu_forward,
+          "ReLU forward pass");
+    m.def("relu_backward", &relu_backward,
+          "ReLU backward pass");
+    
+    // 5. 全连接层
+    m.def("linear_forward", &linear_forward,
+          "Linear layer forward pass");
+    m.def("linear_backward", &linear_backward,
+          "Linear layer backward pass");
+    
+    // 6. 卷积层（前向和反向）
+    m.def("conv2d_forward", &conv2d_forward,
+          py::arg("input"), py::arg("weight"), py::arg("output"),
+          py::arg("stride"), py::arg("padding"),
+          "Convolution forward pass");
+    
+    // 🔴 新增：卷积反向传播
+    m.def("conv2d_backward", [](py::array_t<float> input, 
+                                 py::array_t<float> grad_output,
+                                 py::array_t<float> weight,
+                                 int batch, int in_c, int out_c, 
+                                 int h, int w, int ksize, int stride, int padding) {
+        // 转换为 CUDA Tensor
+        Tensor d_input = from_numpy(input, Device::gpu(0));
+        Tensor d_grad_output = from_numpy(grad_output, Device::gpu(0));
+        Tensor d_weight = from_numpy(weight, Device::gpu(0));
+        
+        // 分配梯度张量
+        Tensor d_grad_input(d_input.shape(), Device::gpu(0));
+        Tensor d_grad_weight(d_weight.shape(), Device::gpu(0));
+        
+        // 计算输出尺寸并分配 col_buffer
+        int h_out = (h + 2*padding - ksize) / stride + 1;
+        int w_out = (w + 2*padding - ksize) / stride + 1;
+        std::vector<int64_t> col_shape = {in_c * ksize * ksize, h_out * w_out};
+        Tensor col_buffer(col_shape, Device::gpu(0));
+        
+        // 创建 cuBLAS handle
+        cublasHandle_t handle;
+        cublasCreate(&handle);
+        
+        // 调用 CUDA backward kernel
+        backward_conv(d_input.data(), d_grad_output.data(), d_weight.data(),
+                     col_buffer.data(), d_grad_input.data(), d_grad_weight.data(),
+                     batch, in_c, out_c, h, w, ksize, stride, padding, handle);
+        
+        cublasDestroy(handle);
+        
+        // 转回 NumPy
+        return py::make_tuple(to_numpy(d_grad_input), to_numpy(d_grad_weight));
+    }, py::arg("input"), py::arg("grad_output"), py::arg("weight"),
+       py::arg("batch"), py::arg("in_c"), py::arg("out_c"),
+       py::arg("h"), py::arg("w"), py::arg("ksize"), 
+       py::arg("stride"), py::arg("padding"),
+       "Convolution backward pass");
+    
+    // 7. 池化层
+    m.def("maxpool_forward", &maxpool_forward,
+          py::arg("input"), py::arg("output"), py::arg("mask"),
+          py::arg("k"), py::arg("s"), py::arg("p"),
+          "Max pooling forward pass");
+    m.def("maxpool_backward", &maxpool_backward,
+          py::arg("grad_output"), py::arg("mask"), py::arg("grad_input"),
+          py::arg("k"), py::arg("s"), py::arg("p"),
+          "Max pooling backward pass");
+    
+    // 8. Softmax 和损失函数
+    m.def("softmax_forward", &softmax_forward,
+          "Softmax forward pass");
+    
+    m.def("cross_entropy_loss", &cross_entropy_loss,
+          "Cross entropy loss computation");
+    m.def("cross_entropy_backward", &cross_entropy_backward,
+          "Cross entropy backward pass");
+    
+    m.def("elementwise_add", [](py::array_t<float> a, py::array_t<float> b) {
+        Tensor ta = from_numpy(a, Device::gpu(0));
+        Tensor tb = from_numpy(b, Device::gpu(0));
+        Tensor tc(ta.shape(), Device::gpu(0));
+        elementwise_add(ta, tb, tc);
+        return to_numpy(tc);
+    }, py::arg("a"), py::arg("b"),
+       "Element-wise addition");
+    
+    m.def("elementwise_add_backward", [](py::array_t<float> grad_out) {
+        Tensor tg = from_numpy(grad_out, Device::gpu(0));
+        Tensor ga(tg.shape(), Device::gpu(0));
+        Tensor gb(tg.shape(), Device::gpu(0));
+        elementwise_add_backward(tg, ga, gb);
+        return py::make_tuple(to_numpy(ga), to_numpy(gb));
+    }, py::arg("grad_out"),
+       "Element-wise addition backward");
+}
+]]></content>
+    </file>
+
+    <file index="9">
+      <path>python/core/device.py</path>
+      <name>device.py</name>
+      <extension>.py</extension>
+      <size_bytes>495</size_bytes>
+      <modified>2026-01-17T17:21:37.118364</modified>
+      <encoding>utf-8</encoding>
+      <lines>20</lines>
+      <content><![CDATA[
+class Device:
+    def __init__(self, device_type, device_id=0):
+        self.device_type = device_type  # "cpu" or "cuda"
+        self.device_id = device_id
+        
+    @staticmethod
+    def cpu():
+        return Device("cpu", 0)
+    
+    @staticmethod
+    def cuda(device_id=0):
+        return Device("cuda", device_id)
+    
+    def __repr__(self):
+        if self.device_type == "cpu":
+            return "cpu()"
+        return f"cuda({self.device_id})"
+
+cpu = Device.cpu()
+cuda = Device.cuda
+]]></content>
+    </file>
+
+    <file index="10">
+      <path>python/cuda_ops/__init__.py</path>
+      <name>__init__.py</name>
+      <extension>.py</extension>
+      <size_bytes>267</size_bytes>
+      <modified>2026-01-17T17:41:26.402040</modified>
+      <encoding>utf-8</encoding>
+      <lines>16</lines>
+      <content><![CDATA[
+"""
+CUDA 算子的统一导出
+"""
+from .conv import conv2d
+from .pooling import maxpool2d
+from .linear import linear
+from .activations import relu, softmax, sigmoid
+
+__all__ = [
+    'conv2d',
+    'maxpool2d',
+    'linear',
+    'relu',
+    'softmax',
+    'sigmoid',
+]
+]]></content>
+    </file>
+
+    <file index="11">
+      <path>python/cuda_ops/activations.py</path>
+      <name>activations.py</name>
+      <extension>.py</extension>
+      <size_bytes>4560</size_bytes>
+      <modified>2026-01-17T17:33:31.454168</modified>
+      <encoding>utf-8</encoding>
+      <lines>119</lines>
+      <content><![CDATA[
+"""
+激活函数的 CUDA 算子包装
+"""
+import numpy as np
+from typing import Tuple
+import my_deep_lib as cuda_lib
+from basic_operator import Op, Value
+
+class ReLUOp(Op):
+    """ReLU 激活函数"""
+    
+    def compute(self, input_data: np.ndarray) -> np.ndarray:
+        """
+        前向传播：y = max(0, x)
+        """
+        # 转换为 CUDA Tensor
+        cuda_input = cuda_lib.Tensor.from_numpy(input_data, cuda_lib.Device.gpu(0))
+        cuda_output = cuda_lib.Tensor(list(input_data.shape), cuda_lib.Device.gpu(0))
+        
+        # 调用 CUDA kernel
+        cuda_lib.relu_forward(cuda_input, cuda_output)
+        
+        return cuda_output.to_numpy()
+    
+    def gradient(self, out_grad: Value, node: Value) -> Tuple[Value]:
+        """
+        反向传播：grad_input = grad_output * (input > 0)
+        """
+        input_node = node.inputs[0]
+        input_data = input_node.realize_cached_data()
+        grad_output_data = out_grad.realize_cached_data()
+        
+        # 转换为 CUDA Tensor
+        cuda_input = cuda_lib.Tensor.from_numpy(input_data, cuda_lib.Device.gpu(0))
+        cuda_grad_output = cuda_lib.Tensor.from_numpy(grad_output_data, cuda_lib.Device.gpu(0))
+        cuda_grad_input = cuda_lib.Tensor(list(input_data.shape), cuda_lib.Device.gpu(0))
+        
+        # 调用 CUDA backward kernel
+        cuda_lib.relu_backward(cuda_input, cuda_grad_output, cuda_grad_input)
+        
+        grad_input_np = cuda_grad_input.to_numpy()
+        grad_input = Value.make_const(grad_input_np, requires_grad=False)
+        
+        return (grad_input,)
+
+class SoftmaxOp(Op):
+    """Softmax 激活函数（通常用于输出层）"""
+    
+    def compute(self, input_data: np.ndarray) -> np.ndarray:
+        """
+        前向传播：softmax(x) = exp(x) / sum(exp(x))
+        input_data: [batch, num_classes]
+        """
+        # 转换为 CUDA Tensor
+        cuda_input = cuda_lib.Tensor.from_numpy(input_data, cuda_lib.Device.gpu(0))
+        cuda_output = cuda_lib.Tensor(list(input_data.shape), cuda_lib.Device.gpu(0))
+        
+        # 调用 CUDA kernel
+        cuda_lib.softmax_forward(cuda_input, cuda_output)
+        
+        return cuda_output.to_numpy()
+    
+    def gradient(self, out_grad: Value, node: Value) -> Tuple[Value]:
+        """
+        Softmax 的梯度比较复杂，但通常与 CrossEntropy 融合计算
+        这里提供一个简化版本
+        """
+        # 获取 softmax 的输出
+        output_data = node.realize_cached_data()
+        grad_output_data = out_grad.realize_cached_data()
+        
+        # Softmax 梯度：grad_input = softmax * (grad_output - sum(grad_output * softmax))
+        # 这里用 NumPy 实现（因为 CUDA kernel 里没有单独的 softmax backward）
+        sum_term = np.sum(grad_output_data * output_data, axis=1, keepdims=True)
+        grad_input_np = output_data * (grad_output_data - sum_term)
+        
+        grad_input = Value.make_const(grad_input_np, requires_grad=False)
+        return (grad_input,)
+
+class SigmoidOp(Op):
+    """Sigmoid 激活函数"""
+    
+    def compute(self, input_data: np.ndarray) -> np.ndarray:
+        """前向传播：y = 1 / (1 + exp(-x))"""
+        cuda_input = cuda_lib.Tensor.from_numpy(input_data, cuda_lib.Device.gpu(0))
+        cuda_output = cuda_lib.Tensor(list(input_data.shape), cuda_lib.Device.gpu(0))
+        
+        cuda_lib.sigmoid_forward(cuda_input, cuda_output)
+        
+        return cuda_output.to_numpy()
+    
+    def gradient(self, out_grad: Value, node: Value) -> Tuple[Value]:
+        """反向传播：grad_input = grad_output * y * (1 - y)"""
+        output_data = node.realize_cached_data()  # sigmoid 的输出
+        grad_output_data = out_grad.realize_cached_data()
+        
+        cuda_output = cuda_lib.Tensor.from_numpy(output_data, cuda_lib.Device.gpu(0))
+        cuda_grad_output = cuda_lib.Tensor.from_numpy(grad_output_data, cuda_lib.Device.gpu(0))
+        cuda_grad_input = cuda_lib.Tensor(list(output_data.shape), cuda_lib.Device.gpu(0))
+        
+        cuda_lib.sigmoid_backward(cuda_output, cuda_grad_output, cuda_grad_input)
+        
+        grad_input_np = cuda_grad_input.to_numpy()
+        grad_input = Value.make_const(grad_input_np, requires_grad=False)
+        
+        return (grad_input,)
+
+# 高层接口
+def relu(x: Value) -> Value:
+    """ReLU 激活函数"""
+    return ReLUOp()(x)
+
+def softmax(x: Value) -> Value:
+    """Softmax 激活函数"""
+    return SoftmaxOp()(x)
+
+def sigmoid(x: Value) -> Value:
+    """Sigmoid 激活函数"""
+    return SigmoidOp()(x)
+]]></content>
+    </file>
+
+    <file index="12">
+      <path>python/cuda_ops/conv.py</path>
+      <name>conv.py</name>
+      <extension>.py</extension>
+      <size_bytes>2687</size_bytes>
+      <modified>2026-01-17T17:28:40.634241</modified>
+      <encoding>utf-8</encoding>
+      <lines>76</lines>
+      <content><![CDATA[
+"""
+CUDA Conv2D 算子的 Python 包装
+"""
+import numpy as np
+from typing import Tuple
+import my_deep_lib as cuda_lib
+from basic_operator import Op, Value
+
+class Conv2DOp(Op):
+    def __init__(self, stride=1, padding=0):
+        self.stride = stride
+        self.padding = padding
+    
+    def compute(self, input_data: np.ndarray, weight_data: np.ndarray) -> np.ndarray:
+        """
+        input_data: [batch, in_channels, height, width]
+        weight_data: [out_channels, in_channels, kernel_h, kernel_w]
+        """
+        batch, in_c, in_h, in_w = input_data.shape
+        out_c, _, k_h, k_w = weight_data.shape
+        
+        # 计算输出尺寸
+        out_h = (in_h + 2 * self.padding - k_h) // self.stride + 1
+        out_w = (in_w + 2 * self.padding - k_w) // self.stride + 1
+        
+        # 转换为 CUDA Tensor
+        cuda_input = cuda_lib.Tensor.from_numpy(input_data, cuda_lib.Device.gpu(0))
+        cuda_weight = cuda_lib.Tensor.from_numpy(weight_data, cuda_lib.Device.gpu(0))
+        cuda_output = cuda_lib.Tensor([batch, out_c, out_h, out_w], cuda_lib.Device.gpu(0))
+        
+        # 调用 CUDA kernel
+        cuda_lib.conv2d_forward(cuda_input, cuda_weight, cuda_output, 
+                               self.stride, self.padding)
+        
+        # 转回 NumPy
+        return cuda_output.to_numpy()
+    
+    def gradient(self, out_grad: Value, node: Value) -> Tuple[Value, Value]:
+        """
+        计算输入和权重的梯度
+        """
+        input_node, weight_node = node.inputs
+        input_data = input_node.realize_cached_data()
+        weight_data = weight_node.realize_cached_data()
+        grad_output_data = out_grad.realize_cached_data()
+        
+        batch, in_c, in_h, in_w = input_data.shape
+        out_c, _, k_h, k_w = weight_data.shape
+        
+        # 调用 CUDA backward
+        grad_input_np, grad_weight_np = cuda_lib.conv2d_backward(
+            input_data, grad_output_data, weight_data,
+            batch, in_c, out_c, in_h, in_w, k_h, 
+            self.stride, self.padding
+        )
+        
+        # 包装为 Value
+        grad_input = Value.make_const(grad_input_np, requires_grad=False)
+        grad_weight = Value.make_const(grad_weight_np, requires_grad=False)
+        
+        return grad_input, grad_weight
+
+def conv2d(input: Value, weight: Value, stride=1, padding=0) -> Value:
+    """
+    卷积操作的高层接口
+    
+    Args:
+        input: [batch, in_channels, H, W]
+        weight: [out_channels, in_channels, kH, kW]
+        stride: 步长
+        padding: 填充
+    
+    Returns:
+        output: [batch, out_channels, H_out, W_out]
+    """
+    return Conv2DOp(stride, padding)(input, weight)
+]]></content>
+    </file>
+
+    <file index="13">
+      <path>python/cuda_ops/linear.py</path>
+      <name>linear.py</name>
+      <extension>.py</extension>
+      <size_bytes>3230</size_bytes>
+      <modified>2026-01-17T17:39:48.470061</modified>
+      <encoding>utf-8</encoding>
+      <lines>81</lines>
+      <content><![CDATA[
+"""
+全连接层的 CUDA 算子包装
+"""
+import numpy as np
+from typing import Tuple
+import my_deep_lib as cuda_lib
+from basic_operator import Op, Value
+
+class LinearOp(Op):
+    """全连接层（矩阵乘法 + bias）"""
+    
+    def compute(self, input_data: np.ndarray, weight_data: np.ndarray, 
+                bias_data: np.ndarray) -> np.ndarray:
+        """
+        前向传播：y = x @ W^T + b
+        input_data: [batch, in_features]
+        weight_data: [out_features, in_features]
+        bias_data: [out_features]
+        """
+        batch_size = input_data.shape[0]
+        out_features = weight_data.shape[0]
+        
+        # 转换为 CUDA Tensor
+        cuda_input = cuda_lib.Tensor.from_numpy(input_data, cuda_lib.Device.gpu(0))
+        cuda_weight = cuda_lib.Tensor.from_numpy(weight_data, cuda_lib.Device.gpu(0))
+        cuda_bias = cuda_lib.Tensor.from_numpy(bias_data, cuda_lib.Device.gpu(0))
+        cuda_output = cuda_lib.Tensor([batch_size, out_features], cuda_lib.Device.gpu(0))
+        
+        # 调用 CUDA kernel
+        cuda_lib.linear_forward(cuda_input, cuda_weight, cuda_bias, cuda_output)
+        
+        return cuda_output.to_numpy()
+    
+    def gradient(self, out_grad: Value, node: Value) -> Tuple[Value, Value, Value]:
+        """
+        反向传播
+        grad_input = grad_output @ W
+        grad_weight = grad_output^T @ input
+        grad_bias = sum(grad_output, axis=0)
+        """
+        input_node, weight_node, bias_node = node.inputs
+        input_data = input_node.realize_cached_data()
+        weight_data = weight_node.realize_cached_data()
+        grad_output_data = out_grad.realize_cached_data()
+        
+        # 转换为 CUDA Tensor
+        cuda_input = cuda_lib.Tensor.from_numpy(input_data, cuda_lib.Device.gpu(0))
+        cuda_weight = cuda_lib.Tensor.from_numpy(weight_data, cuda_lib.Device.gpu(0))
+        cuda_grad_output = cuda_lib.Tensor.from_numpy(grad_output_data, cuda_lib.Device.gpu(0))
+        
+        cuda_grad_input = cuda_lib.Tensor(list(input_data.shape), cuda_lib.Device.gpu(0))
+        cuda_grad_weight = cuda_lib.Tensor(list(weight_data.shape), cuda_lib.Device.gpu(0))
+        cuda_grad_bias = cuda_lib.Tensor([weight_data.shape[0]], cuda_lib.Device.gpu(0))
+        
+        # 调用 CUDA backward kernel
+        cuda_lib.linear_backward(cuda_input, cuda_weight, cuda_grad_output,
+                                cuda_grad_input, cuda_grad_weight, cuda_grad_bias)
+        
+        grad_input_np = cuda_grad_input.to_numpy()
+        grad_weight_np = cuda_grad_weight.to_numpy()
+        grad_bias_np = cuda_grad_bias.to_numpy()
+        
+        grad_input = Value.make_const(grad_input_np, requires_grad=False)
+        grad_weight = Value.make_const(grad_weight_np, requires_grad=False)
+        grad_bias = Value.make_const(grad_bias_np, requires_grad=False)
+        
+        return grad_input, grad_weight, grad_bias
+
+def linear(input: Value, weight: Value, bias: Value) -> Value:
+    """
+    全连接层操作
+    
+    Args:
+        input: [batch, in_features]
+        weight: [out_features, in_features]
+        bias: [out_features]
+    
+    Returns:
+        output: [batch, out_features]
+    """
+    return LinearOp()(input, weight, bias)
+]]></content>
+    </file>
+
+    <file index="14">
+      <path>python/cuda_ops/pooling.py</path>
+      <name>pooling.py</name>
+      <extension>.py</extension>
+      <size_bytes>2882</size_bytes>
+      <modified>2026-01-17T17:28:58.414236</modified>
+      <encoding>utf-8</encoding>
+      <lines>75</lines>
+      <content><![CDATA[
+"""
+CUDA MaxPool2D 算子的 Python 包装
+"""
+import numpy as np
+from typing import Tuple
+import my_deep_lib as cuda_lib
+from basic_operator import Op, Value
+
+class MaxPool2DOp(Op):
+    def __init__(self, kernel_size, stride=None, padding=0):
+        self.kernel_size = kernel_size
+        self.stride = stride if stride is not None else kernel_size
+        self.padding = padding
+        self.mask = None  # 存储 forward 时的 mask，用于 backward
+    
+    def compute(self, input_data: np.ndarray) -> np.ndarray:
+        """
+        input_data: [batch, channels, height, width]
+        """
+        batch, channels, in_h, in_w = input_data.shape
+        
+        # 计算输出尺寸
+        out_h = (in_h + 2 * self.padding - self.kernel_size) // self.stride + 1
+        out_w = (in_w + 2 * self.padding - self.kernel_size) // self.stride + 1
+        
+        # 转换为 CUDA Tensor
+        cuda_input = cuda_lib.Tensor.from_numpy(input_data, cuda_lib.Device.gpu(0))
+        cuda_output = cuda_lib.Tensor([batch, channels, out_h, out_w], cuda_lib.Device.gpu(0))
+        cuda_mask = cuda_lib.Tensor([batch, channels, out_h, out_w], cuda_lib.Device.gpu(0))
+        
+        # 调用 CUDA kernel
+        cuda_lib.maxpool_forward(cuda_input, cuda_output, cuda_mask,
+                                self.kernel_size, self.stride, self.padding)
+        
+        # 保存 mask 用于 backward（转为 NumPy 保存）
+        self.mask = cuda_mask.to_numpy()
+        
+        return cuda_output.to_numpy()
+    
+    def gradient(self, out_grad: Value, node: Value) -> Tuple[Value]:
+        """
+        MaxPool 的梯度传播
+        """
+        input_node = node.inputs[0]
+        input_data = input_node.realize_cached_data()
+        grad_output_data = out_grad.realize_cached_data()
+        
+        # 转换为 CUDA Tensor
+        cuda_grad_output = cuda_lib.Tensor.from_numpy(grad_output_data, cuda_lib.Device.gpu(0))
+        cuda_mask = cuda_lib.Tensor.from_numpy(self.mask, cuda_lib.Device.gpu(0))
+        cuda_grad_input = cuda_lib.Tensor(list(input_data.shape), cuda_lib.Device.gpu(0))
+        
+        # 调用 CUDA backward kernel
+        cuda_lib.maxpool_backward(cuda_grad_output, cuda_mask, cuda_grad_input,
+                                 self.kernel_size, self.stride, self.padding)
+        
+        grad_input_np = cuda_grad_input.to_numpy()
+        grad_input = Value.make_const(grad_input_np, requires_grad=False)
+        
+        return (grad_input,)
+
+def maxpool2d(input: Value, kernel_size, stride=None, padding=0) -> Value:
+    """
+    MaxPool2D 操作
+    
+    Args:
+        input: [batch, channels, H, W]
+        kernel_size: 池化窗口大小
+        stride: 步长（默认等于 kernel_size）
+        padding: 填充
+    
+    Returns:
+        output: [batch, channels, H_out, W_out]
+    """
+    return MaxPool2DOp(kernel_size, stride, padding)(input)
+]]></content>
+    </file>
+
+    <file index="15">
+      <path>python/nn/__init__.py</path>
+      <name>__init__.py</name>
+      <extension>.py</extension>
+      <size_bytes>386</size_bytes>
+      <modified>2026-01-17T17:41:39.354036</modified>
+      <encoding>utf-8</encoding>
+      <lines>20</lines>
+      <content><![CDATA[
+"""
+神经网络模块的统一导出
+"""
+from .module import Module, Parameter
+from .conv import Conv2D, MaxPool2D
+from .linear import Linear
+from .activations import ReLU, Softmax, Sigmoid
+from .loss import cross_entropy_loss
+
+__all__ = [
+    'Module',
+    'Parameter',
+    'Conv2D',
+    'MaxPool2D',
+    'Linear',
+    'ReLU',
+    'Softmax',
+    'Sigmoid',
+    'cross_entropy_loss',
+]
+]]></content>
+    </file>
+
+    <file index="16">
+      <path>python/nn/activations.py</path>
+      <name>activations.py</name>
+      <extension>.py</extension>
+      <size_bytes>740</size_bytes>
+      <modified>2026-01-17T17:40:24.062056</modified>
+      <encoding>utf-8</encoding>
+      <lines>31</lines>
+      <content><![CDATA[
+"""
+激活函数层的封装
+"""
+from nn.module import Module
+from basic_operator import Value
+from cuda_ops.activations import relu, softmax, sigmoid
+
+class ReLU(Module):
+    """ReLU 激活层"""
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x: Value) -> Value:
+        return relu(x)
+
+class Softmax(Module):
+    """Softmax 激活层"""
+    def __init__(self, dim=-1):
+        super().__init__()
+        self.dim = dim  # 暂时不用，默认在最后一维
+    
+    def forward(self, x: Value) -> Value:
+        return softmax(x)
+
+class Sigmoid(Module):
+    """Sigmoid 激活层"""
+    def __init__(self):
+        super().__init__()
+    
+    def forward(self, x: Value) -> Value:
+        return sigmoid(x)
+]]></content>
+    </file>
+
+    <file index="17">
+      <path>python/nn/conv.py</path>
+      <name>conv.py</name>
+      <extension>.py</extension>
+      <size_bytes>2177</size_bytes>
+      <modified>2026-01-17T17:29:48.126225</modified>
+      <encoding>utf-8</encoding>
+      <lines>73</lines>
+      <content><![CDATA[
+"""
+卷积和池化层的封装
+"""
+import numpy as np
+import math
+from nn.module import Module, Parameter
+from basic_operator import Value
+from cuda_ops.conv import conv2d
+from cuda_ops.pooling import maxpool2d
+
+class Conv2D(Module):
+    """
+    2D 卷积层
+    
+    Args:
+        in_channels: 输入通道数
+        out_channels: 输出通道数
+        kernel_size: 卷积核大小
+        stride: 步长
+        padding: 填充
+    """
+    def __init__(self, in_channels, out_channels, kernel_size, 
+                 stride=1, padding=0, bias=False):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        
+        # Kaiming 初始化
+        fan_in = in_channels * kernel_size * kernel_size
+        std = math.sqrt(2.0 / fan_in)
+        weight_data = np.random.randn(out_channels, in_channels, 
+                                      kernel_size, kernel_size).astype(np.float32) * std
+        
+        self.weight = Parameter.make_const(weight_data, requires_grad=True)
+        
+        # 简化版：不使用 bias
+        self.bias = None
+    
+    def forward(self, x: Value) -> Value:
+        """
+        x: [batch, in_channels, H, W]
+        returns: [batch, out_channels, H_out, W_out]
+        """
+        out = conv2d(x, self.weight, self.stride, self.padding)
+        if self.bias is not None:
+            # TODO: 添加 bias（需要实现 broadcast add）
+            pass
+        return out
+
+class MaxPool2D(Module):
+    """
+    2D 最大池化层
+    
+    Args:
+        kernel_size: 池化窗口大小
+        stride: 步长（默认等于 kernel_size）
+        padding: 填充
+    """
+    def __init__(self, kernel_size, stride=None, padding=0):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+    
+    def forward(self, x: Value) -> Value:
+        """
+        x: [batch, channels, H, W]
+        returns: [batch, channels, H_out, W_out]
+        """
+        return maxpool2d(x, self.kernel_size, self.stride, self.padding)
+]]></content>
+    </file>
+
+    <file index="18">
+      <path>python/nn/linear.py</path>
+      <name>linear.py</name>
+      <extension>.py</extension>
+      <size_bytes>1457</size_bytes>
+      <modified>2026-01-17T17:40:08.518058</modified>
+      <encoding>utf-8</encoding>
+      <lines>46</lines>
+      <content><![CDATA[
+"""
+全连接层的封装
+"""
+import numpy as np
+import math
+from nn.module import Module, Parameter
+from basic_operator import Value
+from cuda_ops.linear import linear
+
+class Linear(Module):
+    """
+    全连接层
+    
+    Args:
+        in_features: 输入特征数
+        out_features: 输出特征数
+        bias: 是否使用偏置
+    """
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        # Kaiming 初始化
+        std = math.sqrt(1.0 / in_features)
+        weight_data = np.random.randn(out_features, in_features).astype(np.float32) * std
+        self.weight = Parameter.make_const(weight_data, requires_grad=True)
+        
+        if bias:
+            bias_data = np.zeros(out_features, dtype=np.float32)
+            self.bias = Parameter.make_const(bias_data, requires_grad=True)
+        else:
+            self.bias = None
+    
+    def forward(self, x: Value) -> Value:
+        """
+        x: [batch, in_features]
+        returns: [batch, out_features]
+        """
+        if self.bias is not None:
+            return linear(x, self.weight, self.bias)
+        else:
+            # 如果没有 bias，创建一个零向量
+            bias_data = np.zeros(self.out_features, dtype=np.float32)
+            bias = Value.make_const(bias_data, requires_grad=False)
+            return linear(x, self.weight, bias)
+]]></content>
+    </file>
+
+    <file index="19">
+      <path>python/nn/loss.py</path>
+      <name>loss.py</name>
+      <extension>.py</extension>
+      <size_bytes>2490</size_bytes>
+      <modified>2026-01-17T17:40:34.642054</modified>
+      <encoding>utf-8</encoding>
+      <lines>68</lines>
+      <content><![CDATA[
+"""
+损失函数
+"""
+import numpy as np
+import my_deep_lib as cuda_lib
+from basic_operator import Op, Value
+
+class CrossEntropyLossOp(Op):
+    """交叉熵损失"""
+    
+    def compute(self, logits_data: np.ndarray, labels_data: np.ndarray) -> np.ndarray:
+        """
+        logits_data: [batch, num_classes] (未经过 softmax)
+        labels_data: [batch] (类别索引)
+        """
+        # 先在 CUDA 上做 softmax
+        cuda_logits = cuda_lib.Tensor.from_numpy(logits_data, cuda_lib.Device.gpu(0))
+        cuda_probs = cuda_lib.Tensor(list(logits_data.shape), cuda_lib.Device.gpu(0))
+        cuda_lib.softmax_forward(cuda_logits, cuda_probs)
+        
+        # 计算交叉熵
+        cuda_labels = cuda_lib.Tensor.from_numpy(labels_data, cuda_lib.Device.gpu(0))
+        loss = cuda_lib.cross_entropy_loss(cuda_probs, cuda_labels)
+        
+        # 保存 probs 用于反向传播
+        self.probs = cuda_probs.to_numpy()
+        
+        return np.array(loss, dtype=np.float32)
+    
+    def gradient(self, out_grad: Value, node: Value) -> tuple:
+        """
+        交叉熵 + softmax 的融合梯度
+        grad_logits = (probs - one_hot(labels)) / batch_size
+        """
+        _, labels_node = node.inputs
+        labels_data = labels_node.realize_cached_data()
+        
+        # 转换为 CUDA Tensor
+        cuda_probs = cuda_lib.Tensor.from_numpy(self.probs, cuda_lib.Device.gpu(0))
+        cuda_labels = cuda_lib.Tensor.from_numpy(labels_data, cuda_lib.Device.gpu(0))
+        cuda_grad_logits = cuda_lib.Tensor(list(self.probs.shape), cuda_lib.Device.gpu(0))
+        
+        # 调用 CUDA backward kernel
+        cuda_lib.cross_entropy_backward(cuda_probs, cuda_labels, cuda_grad_logits)
+        
+        grad_logits_np = cuda_grad_logits.to_numpy()
+        
+        # 乘以 out_grad（通常是 1）
+        out_grad_data = out_grad.realize_cached_data()
+        grad_logits_np = grad_logits_np * out_grad_data
+        
+        grad_logits = Value.make_const(grad_logits_np, requires_grad=False)
+        grad_labels = None  # labels 不需要梯度
+        
+        return (grad_logits, grad_labels)
+
+def cross_entropy_loss(logits: Value, labels: Value) -> Value:
+    """
+    交叉熵损失（融合了 Softmax）
+    
+    Args:
+        logits: [batch, num_classes] (未经过 softmax 的原始输出)
+        labels: [batch] (类别索引，如 [0, 2, 1, 3, ...])
+    
+    Returns:
+        loss: 标量
+    """
+    return CrossEntropyLossOp()(logits, labels)
+]]></content>
+    </file>
+
+    <file index="20">
+      <path>python/nn/module.py</path>
+      <name>module.py</name>
+      <extension>.py</extension>
+      <size_bytes>1502</size_bytes>
+      <modified>2026-01-17T17:29:27.690229</modified>
+      <encoding>utf-8</encoding>
+      <lines>57</lines>
+      <content><![CDATA[
+"""
+Module 基类（类似 PyTorch 的 nn.Module）
+"""
+from typing import List, Iterator
+from basic_operator import Value
+
+class Parameter(Value):
+    """可训练参数（继承自 Value）"""
+    pass
+
+def _unpack_params(value: object) -> List[Value]:
+    """递归提取所有参数"""
+    if isinstance(value, Parameter):
+        return [value]
+    elif isinstance(value, Module):
+        return value.parameters()
+    elif isinstance(value, dict):
+        params = []
+        for k, v in value.items():
+            params += _unpack_params(v)
+        return params
+    elif isinstance(value, (list, tuple)):
+        params = []
+        for v in value:
+            params += _unpack_params(v)
+        return params
+    else:
+        return []
+
+class Module:
+    """神经网络模块基类"""
+    
+    def __init__(self):
+        self.training = True
+    
+    def parameters(self) -> List[Parameter]:
+        """返回所有可训练参数"""
+        return _unpack_params(self.__dict__)
+    
+    def zero_grad(self):
+        """清空梯度"""
+        for p in self.parameters():
+            p.grad = None
+    
+    def train(self):
+        """设置为训练模式"""
+        self.training = True
+    
+    def eval(self):
+        """设置为评估模式"""
+        self.training = False
+    
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+    
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError("Subclasses must implement forward()")
+]]></content>
+    </file>
+
+    <file index="21">
+      <path>python/utils.py</path>
+      <name>utils.py</name>
+      <extension>.py</extension>
+      <size_bytes>2738</size_bytes>
+      <modified>2026-01-17T17:18:08.154425</modified>
+      <encoding>utf-8</encoding>
+      <lines>74</lines>
+      <content><![CDATA[
+"""
+此次作业借鉴和参考了Needle项目 https://github.com/dlsyscourse/lecture5
+本文件我们给出可能会用到的一些工具函数
+为防止交叉引用，你可以把需要的函数复制到你的代码中
+"""
+
+import math
+from device import cpu
+from task1_operators import Tensor
+
+def rand(*shape, low=0.0, high=1.0, device=None, dtype="float32", requires_grad=False):
+    """Generate random numbers uniform between low and high"""
+    device = cpu() if device is None else device
+    array = device.rand(*shape) * (high - low) + low
+    return Tensor(array, device=device, dtype=dtype, requires_grad=requires_grad)
+
+
+def randn(*shape, mean=0.0, std=1.0, device=None, dtype="float32", requires_grad=False):
+    """Generate random normal with specified mean and std deviation"""
+    device = cpu() if device is None else device
+    array = device.randn(*shape) * std + mean
+    return Tensor(array, device=device, dtype=dtype, requires_grad=requires_grad)
+
+
+def constant(*shape, c=1.0, device=None, dtype="float32", requires_grad=False):
+    """Generate constant Tensor"""
+    device = cpu() if device is None else device
+    array = device.ones(*shape, dtype=dtype) * c  # note: can change dtype
+    return Tensor(array, device=device, dtype=dtype, requires_grad=requires_grad)
+
+
+def ones(*shape, device=None, dtype="float32", requires_grad=False):
+    """Generate all-ones Tensor"""
+    return constant(
+        *shape, c=1.0, device=device, dtype=dtype, requires_grad=requires_grad
+    )
+
+
+def zeros(*shape, device=None, dtype="float32", requires_grad=False):
+    """Generate all-zeros Tensor"""
+    return constant(
+        *shape, c=0.0, device=device, dtype=dtype, requires_grad=requires_grad
+    )
+
+
+def randb(*shape, p=0.5, device=None, dtype="bool", requires_grad=False):
+    """Generate binary random Tensor"""
+    device = cpu() if device is None else device
+    array = device.rand(*shape) <= p
+    return Tensor(array, device=device, dtype=dtype, requires_grad=requires_grad)
+
+
+def one_hot(n, i, device=None, dtype="float32", requires_grad=False):
+    """Generate one-hot encoding Tensor"""
+    device = cpu() if device is None else device
+    return Tensor(
+        device.one_hot(n, i.numpy(), dtype=dtype),
+        device=device,
+        requires_grad=requires_grad,
+    )
+
+
+def zeros_like(array, *, device=None, requires_grad=False):
+    device = device if device else array.device
+    return zeros(
+        *array.shape, dtype=array.dtype, device=device, requires_grad=requires_grad
+    )
+
+
+def ones_like(array, *, device=None, requires_grad=False):
+    device = device if device else array.device
+    return ones(
+        *array.shape, dtype=array.dtype, device=device, requires_grad=requires_grad
+    )
+]]></content>
+    </file>
+
+  </files>
+
+</project>

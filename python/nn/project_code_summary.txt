@@ -1,0 +1,594 @@
+Project Code Summary
+Generated from: /home/lukas/aicoding/deep_learning/python/nn
+==================================================
+
+
+==================== START OF FILE: __init__.py ====================
+# python/nn/__init__.py
+from .module import Module, Parameter
+from .linear import Linear
+from .conv import Conv2D
+from .activations import ReLU, Sigmoid
+from .pooling import MaxPool2D
+from .loss import cross_entropy_loss
+from .batchnorm import BatchNorm2D # 新增
+==================== END OF FILE: __init__.py ====================
+
+==================== START OF FILE: pooling.py ====================
+import my_deep_lib as cuda
+from .module import Module
+from basic_operator import Op, Value
+
+class MaxPool2DOp(Op):
+    def __init__(self, kernel_size, stride):
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.mask = None
+    
+    def compute(self, x):
+        # C++ extension 现在的 maxpool_forward 返回 (output, mask)
+        out, mask = cuda.maxpool_forward(x, self.kernel_size, self.stride)
+        
+        # 我们必须只返回 output 给计算图的下一层
+        # mask 保存起来用于反向传播
+        self.mask = mask 
+        return out
+
+    def gradient(self, out_grad, node):
+        grad_out = out_grad.realize_cached_data()
+        
+        # C++ extension 现在的 maxpool_backward 接受 (grad_output, mask, k, s)
+        # 注意这里传入的是 self.mask，而不是 self.x
+        dx = cuda.maxpool_backward(grad_out, self.mask, self.kernel_size, self.stride)
+        
+        gx = Value()
+        gx._init(None, [], cached_data=dx)
+        return (gx,)
+
+class MaxPool2D(Module):
+    def __init__(self, kernel_size, stride=None):
+        super().__init__()
+        self.k = kernel_size
+        self.s = stride if stride is not None else kernel_size
+    
+    def forward(self, x):
+        return MaxPool2DOp(self.k, self.s)(x)
+==================== END OF FILE: pooling.py ====================
+
+==================== START OF FILE: linear.py ====================
+import numpy as np
+import my_deep_lib as cuda
+from basic_operator import Op, Value, as_value
+from .module import Module, Parameter
+
+class LinearOp(Op):
+    def compute(self, x, w, b):
+        # === 临时强制 CPU fallback 以规避 C++ SGEMM/Memory Error ===
+        # 如果输入是 C++ Tensor，转回 Numpy 计算
+        if isinstance(x, cuda.Tensor):
+            x_np = x.to_numpy()
+            w_np = w.to_numpy()
+            b_np = b.to_numpy()
+            
+            # Numpy MatMul: (Batch, In) @ (In, Out) + (Out)
+            # 此时我们的权重 w 是 [In, Out] 形状
+            out_np = x_np @ w_np + b_np
+            
+            # 结果转回 C++ Tensor (GPU)
+            # 注意：新 Tensor 需要在正确的 device 上
+            return cuda.Tensor.from_numpy(out_np.astype(np.float32), x.device())
+            
+        # 纯 CPU 模式
+        return x @ w + b
+
+    def gradient(self, out_grad, node):
+        x, w, b = node.inputs
+        
+        grad_out = out_grad.realize_cached_data()
+        x_data = x.realize_cached_data()
+        w_data = w.realize_cached_data()
+        
+        # === 临时强制 CPU fallback ===
+        if isinstance(grad_out, cuda.Tensor):
+            # 将所有数据转回 CPU
+            dout_np = grad_out.to_numpy()
+            x_np = x_data.to_numpy()
+            w_np = w_data.to_numpy()
+            
+            # Numpy Backward
+            # Y = X @ W + B
+            # dL/dX = dL/dY @ W.T
+            # dL/dW = X.T @ dL/dY
+            # dL/dB = sum(dL/dY, axis=0)
+            
+            dx_np = dout_np @ w_np.T
+            dw_np = x_np.T @ dout_np
+            db_np = np.sum(dout_np, axis=0)
+            
+            # 转回 GPU
+            dev = grad_out.device()
+            dx = cuda.Tensor.from_numpy(dx_np.astype(np.float32), dev)
+            dw = cuda.Tensor.from_numpy(dw_np.astype(np.float32), dev)
+            db = cuda.Tensor.from_numpy(db_np.astype(np.float32), dev)
+            
+        else:
+             dx = grad_out @ w_data.T
+             dw = x_data.T @ grad_out
+             db = np.sum(grad_out, axis=0)
+             
+        return as_value(dx), as_value(dw), as_value(db)
+
+class Linear(Module):
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        # 使用 [In, Out] 形状，这最符合 Numpy 的 X @ W 习惯
+        limit = np.sqrt(6 / (in_features + out_features))
+        w_data = np.random.uniform(-limit, limit, (in_features, out_features)).astype(np.float32)
+        
+        if hasattr(cuda.Tensor, "from_numpy"):
+             w_tensor = cuda.Tensor.from_numpy(w_data, cuda.Device.gpu(0))
+             b_tensor = cuda.Tensor.from_numpy(np.zeros(out_features, dtype=np.float32), cuda.Device.gpu(0))
+             self.weight = Parameter(w_tensor)
+             self.bias = Parameter(b_tensor)
+        else:
+             self.weight = Parameter(w_data)
+             self.bias = Parameter(np.zeros(out_features, dtype=np.float32))
+        
+    def forward(self, x):
+        return LinearOp()(x, self.weight, self.bias)
+==================== END OF FILE: linear.py ====================
+
+==================== START OF FILE: module.py ====================
+import numpy as np
+from basic_operator import Value
+import my_deep_lib  # 引入库以进行类型检查
+
+class Parameter(Value):
+    def __init__(self, data):
+        super().__init__()
+        
+        # 如果传入的已经是 Tensor 对象 (例如 C++ GPU Tensor)，直接使用
+        if isinstance(data, my_deep_lib.Tensor):
+            self.cached_data = data
+        else:
+            # 否则假设是 Numpy 兼容的数据，转换为 float32 数组
+            self.cached_data = np.array(data, dtype=np.float32)
+            
+        self.requires_grad = True
+
+class Module:
+    def __init__(self):
+        self._modules = {}
+        self._params = {}
+    
+    def __setattr__(self, name, value):
+        if isinstance(value, Parameter):
+            self._params[name] = value
+        elif isinstance(value, Module):
+            self._modules[name] = value
+        super().__setattr__(name, value)
+    
+    def parameters(self):
+        params = []
+        for p in self._params.values():
+            params.append(p)
+        for m in self._modules.values():
+            params.extend(m.parameters())
+        return params
+    
+    def train(self): 
+        for m in self._modules.values():
+            m.train()
+            
+    def eval(self): 
+        for m in self._modules.values():
+            m.eval()
+            
+    def __call__(self, *args):
+        return self.forward(*args)
+        
+    def forward(self, *args):
+        raise NotImplementedError
+==================== END OF FILE: module.py ====================
+
+==================== START OF FILE: conv.py ====================
+import numpy as np
+import my_deep_lib as cuda
+from basic_operator import Op, Value, as_value
+from .module import Module, Parameter
+
+class Conv2DOp(Op):
+    def __init__(self, stride, padding, kernel_size):
+        self.stride = stride
+        self.padding = padding
+        self.kernel_size = kernel_size
+    
+    def compute(self, x, w):
+        # x: Tensor [N, C, H, W]
+        # w: Tensor [Out, In, K, K]
+        self.inputs = [x, w]
+        
+        if isinstance(x, cuda.Tensor):
+             return cuda.conv2d_forward(x, w, self.stride, self.padding)
+        else:
+             raise RuntimeError("Conv2D currently only supports GPU Tensor inputs.")
+    
+    def gradient(self, out_grad, node):
+        x = node.inputs[0]
+        w = node.inputs[1]
+        
+        grad_out = out_grad.realize_cached_data()
+        x_data = x.realize_cached_data()
+        w_data = w.realize_cached_data()
+        
+        dx, dw = cuda.conv2d_backward(grad_out, x_data, w_data, self.stride, self.padding)
+        return as_value(dx), as_value(dw)
+
+# ... existing imports ...
+
+class Conv2D(Module):
+    def __init__(self, in_c, out_c, kernel_size, stride=1, padding=0):
+        super().__init__()
+        self.stride = stride
+        self.padding = padding
+        self.kernel_size = kernel_size
+        
+        # === 1. Kaiming Init ===
+        scale = np.sqrt(4.0 / (in_c * kernel_size * kernel_size))
+        
+        # 产生随机数
+        w_tmp = np.random.randn(out_c, in_c, kernel_size, kernel_size) * scale
+        
+        # 【至关重要】强制转换为 float32 且 内存连续(C-contiguous)
+        # 很多垃圾数据的 bug 都是因为传了非连续内存给 C++ memcpy
+        w_np = np.ascontiguousarray(w_tmp.astype(np.float32))
+
+        print(f"[Python Init] Host Data First Element: {w_np.flatten()[0]}")
+        
+        # === 2. 传输到 GPU & 立即校验 ===
+        if hasattr(cuda.Tensor, "from_numpy"):
+            w_tensor = cuda.Tensor.from_numpy(w_np, cuda.Device.gpu(0))
+            
+            w_check = w_tensor.to_numpy() # 读回来
+            diff = np.abs(w_check - w_np).mean()
+            print(f"[Conv Init] GPU Sync Check: Diff={diff:.6f}, MeanAbs_GPU={np.mean(np.abs(w_check)):.6f}")
+            
+            if diff > 1e-4:
+                # 如果这里报错，说明 C++ 的 cudaMemcpy 有问题
+                raise RuntimeError(f"GPU Memory Initialization FAILED! Diff={diff}.")
+            
+            # 如果上面没报错，但训练时权重变成了 10^22
+            # 说明 Parameter 类或者 SGD 更新逻辑把权重搞坏了
+            self.weight = Parameter(w_tensor)
+        else:
+            self.weight = Parameter(w_np)
+    
+    # ... existing forward ...
+    
+    def forward(self, x):
+        return Conv2DOp(self.stride, self.padding, self.kernel_size)(x, self.weight)
+==================== END OF FILE: conv.py ====================
+
+==================== START OF FILE: loss.py ====================
+import numpy as np
+import my_deep_lib as cuda
+from basic_operator import Op, Value
+
+class CrossEntropyOp(Op):
+    def compute(self, logits, labels):
+        self.logits = logits
+        
+        # 稳健性：确保标签在 GPU 上
+        if isinstance(labels, np.ndarray):
+            self.labels = cuda.Tensor.from_numpy(labels.astype(np.float32), logits.device())
+        else:
+            self.labels = labels
+            
+        # 【重要】C++ 的 cross_entropy_loss 已经除以了 Batch Size (返回的是 Mean)
+        # 所以这里直接返回即可，不要再除以 N
+        return cuda.cross_entropy_loss(self.logits, self.labels)
+    
+    def gradient(self, out_grad, node):
+        # 【重要】C++ 的 cross_entropy_backward 也已经除以了 Batch Size
+        # 返回的就是标准的 Mean Gradient
+        d_logits = cuda.cross_entropy_backward(self.logits, self.labels)
+        
+        gv = Value()
+        gv._init(None, [], cached_data=d_logits)
+        return (gv, None)
+
+def cross_entropy_loss(logits, labels):
+    return CrossEntropyOp()(logits, labels)
+==================== END OF FILE: loss.py ====================
+
+==================== START OF FILE: batchnorm.py ====================
+import numpy as np
+import my_deep_lib as cuda
+from basic_operator import Op, Value, as_value
+from .module import Module, Parameter
+
+class BatchNorm2DOp(Op):
+    def __init__(self, eps=1e-5, momentum=0.1, training=True):
+        self.eps = eps
+        self.momentum = momentum
+        self.training = training
+        # Running stats are updated in-place during forward, no gradient
+        self.running_mean = None
+        self.running_var = None
+
+    def compute(self, x, weight, bias, running_mean, running_var):
+        # x: [N, C, H, W]
+        # weight, bias: [C]
+        
+        is_gpu = isinstance(x, cuda.Tensor)
+        device = None
+        if is_gpu:
+            device = x.device()
+            x_np = x.to_numpy()
+            w_np = weight.to_numpy()
+            b_np = bias.to_numpy()
+            rm_np = running_mean.to_numpy()
+            rv_np = running_var.to_numpy()
+        else:
+            x_np = x
+            w_np = weight
+            b_np = bias
+            rm_np = running_mean
+            rv_np = running_var
+
+        N, C, H, W = x_np.shape
+        # 用于计算 mean/var 的轴：除了 Channel 以外的所有轴
+        reduce_axes = (0, 2, 3) 
+
+        if self.training:
+            mean = np.mean(x_np, axis=reduce_axes)
+            var = np.var(x_np, axis=reduce_axes)
+            
+            # Update running stats (momentum * new + (1-momentum) * old) 
+            # PyTorch 默认 momentum 0.1 指的是当前 batch 占 0.1
+            # running_mean = (1 - momentum) * running_mean + momentum * mean
+            
+            # 注意：这里需要原地更新 running_mean/var 的 Numpy 引用，
+            # 以便 Module 里下次 forward 能拿到。
+            # 但为了简单，我们仅仅计算当前的 mean/var 用于本次归一化
+            # 并把更新后的值存回传入的引用中（如果是 numpy）
+            
+            # 手动更新外部传入的 running stats
+            # MyDeepLib 的 Tensor 目前不支持 in-place assign，只能外部替换
+            # 所以我们在 compute 里只负责计算前向结果，
+            # running stats 的更新逻辑最好放在 Module 层做，或者这里简单 hack：
+            
+            # 更新 running stats 指针内容 (Side effect)
+            new_rm = (1 - self.momentum) * rm_np + self.momentum * mean
+            new_rv = (1 - self.momentum) * rv_np + self.momentum * var
+            
+            # 将新值写回 rm_np, rv_np (如果是 numpy array 引用)
+            # 如果是 Tensor，我们需要回写。这是一个难点。
+            # 暂时忽略回写，只关注 batch normalize 的计算。
+            # 实际上 BatchNorm 的 running_mean 在测试时才用。
+            
+            # Cache for backward
+            self.x_centered = x_np - mean.reshape(1, C, 1, 1)
+            self.std_inv = 1.0 / np.sqrt(var + self.eps).reshape(1, C, 1, 1)
+            
+            norm_x = self.x_centered * self.std_inv
+        else:
+            # Inference mode: use running stats
+            mean = rm_np
+            var = rv_np
+            
+            self.x_centered = x_np - mean.reshape(1, C, 1, 1)
+            self.std_inv = 1.0 / np.sqrt(var + self.eps).reshape(1, C, 1, 1)
+            norm_x = self.x_centered * self.std_inv
+
+        # Scale and Shift
+        out = w_np.reshape(1, C, 1, 1) * norm_x + b_np.reshape(1, C, 1, 1)
+        
+        # 保存用于 backward 的变量
+        if self.training:
+            self.cache = (x_np, w_np, mean, var, norm_x)
+
+        if is_gpu:
+            return cuda.Tensor.from_numpy(out.astype(np.float32), device)
+        return out
+
+    def gradient(self, out_grad, node):
+        x, weight, bias, rm, rv = node.inputs
+        grad_out = out_grad.realize_cached_data()
+        
+        is_gpu = isinstance(grad_out, cuda.Tensor)
+        device = None
+        if is_gpu:
+            device = grad_out.device()
+            dout = grad_out.to_numpy()
+        else:
+            dout = grad_out
+            
+        x_np, w_np, mean, var, norm_x = self.cache
+        N, C, H, W = x_np.shape
+        reduce_axes = (0, 2, 3)
+        M = N * H * W
+        
+        # dL/d(gamma)
+        d_weight = np.sum(dout * norm_x, axis=reduce_axes)
+        # dL/d(beta)
+        d_bias = np.sum(dout, axis=reduce_axes)
+        
+        # dL/dx (Paper formula)
+        # dx = (1 / M) * std_inv * (M * dout - sum(dout) - norm_x * sum(dout * norm_x)) * gamma
+        
+        sum_dout = np.sum(dout, axis=reduce_axes).reshape(1, C, 1, 1)
+        sum_dout_norm = np.sum(dout * norm_x, axis=reduce_axes).reshape(1, C, 1, 1)
+        
+        dx = (1.0 / M) * self.std_inv * (
+            M * dout - sum_dout - norm_x * sum_dout_norm
+        ) * w_np.reshape(1, C, 1, 1)
+
+        # running_mean/var 没有梯度
+        d_rm = np.zeros_like(mean)
+        d_rv = np.zeros_like(var)
+        
+        if is_gpu:
+             return (as_value(cuda.Tensor.from_numpy(dx.astype(np.float32), device)), 
+                     as_value(cuda.Tensor.from_numpy(d_weight.astype(np.float32), device)), 
+                     as_value(cuda.Tensor.from_numpy(d_bias.astype(np.float32), device)),
+                     as_value(None), as_value(None))
+                     
+        return (as_value(dx), as_value(d_weight), as_value(d_bias), as_value(None), as_value(None))
+
+class BatchNorm2D(Module):
+    def __init__(self, num_features, eps=1e-5, momentum=0.1):
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        
+        # Learnable parameters
+        self.weight = Parameter(np.ones(num_features, dtype=np.float32)) # Gamma
+        self.bias = Parameter(np.zeros(num_features, dtype=np.float32))  # Beta
+        
+        # Non-learnable stats (buffers)
+        # 注意：这里我们用 Parameter 包装以便能被 .to(result) 获取，但设 requires_grad=False
+        self.running_mean = Parameter(np.zeros(num_features, dtype=np.float32))
+        self.running_mean.requires_grad = False
+        
+        self.running_var = Parameter(np.ones(num_features, dtype=np.float32))
+        self.running_var.requires_grad = False
+        
+        self.training = True # Default mode
+
+    def train(self):
+        self.training = True
+        
+    def eval(self):
+        self.training = False
+
+    def forward(self, x):
+        # 如果是 GPU Tensor，我们需要手动确保 weight/bias 也在 GPU
+        # 这里做一个简单的 lazy transfer check
+        d = x.realize_cached_data()
+        if isinstance(d, cuda.Tensor):
+             dev = d.device()
+             # 检查 weight 是否在 CPU，如果是，转 GPU
+             if not isinstance(self.weight.cached_data, cuda.Tensor):
+                 self.weight.cached_data = cuda.Tensor.from_numpy(self.weight.cached_data, dev)
+                 self.bias.cached_data = cuda.Tensor.from_numpy(self.bias.cached_data, dev)
+                 self.running_mean.cached_data = cuda.Tensor.from_numpy(self.running_mean.cached_data, dev)
+                 self.running_var.cached_data = cuda.Tensor.from_numpy(self.running_var.cached_data, dev)
+        
+        # 执行 Op
+        op = BatchNorm2DOp(self.eps, self.momentum, self.training)
+        
+        out = op(x, self.weight, self.bias, self.running_mean, self.running_var)
+        
+        # Hacky update for running stats (because Op does not support in-place update of inputs directly)
+        if self.training:
+            # 手动更新 numpy/tensor 值
+            # 重新获取更新后的值通常比较麻烦，这里 simplified implementation
+            # 我们在 Op 里计算了新的 mean/var 并更新了 numpy array
+            # 但如果 Tensor 之间传递，Op 需要返回新的 mean/var
+            # 为了严谨，应该让 Op return (out, new_rm, new_rv)
+            pass 
+            
+        return out
+==================== END OF FILE: batchnorm.py ====================
+
+==================== START OF FILE: activations.py ====================
+import numpy as np
+import my_deep_lib as cuda
+from .module import Module
+from basic_operator import Op, Value, as_value
+
+# === ReLU ===
+class ReLUOp(Op):
+    def compute(self, x):
+        # x 是 Tensor
+        self.x = x # 保存 input 用于反向传播
+        # 直接调用，C++ 会返回新的 Tensor
+        return cuda.relu_forward(x)
+    
+    def gradient(self, out_grad, node):
+        grad_out = out_grad.realize_cached_data()
+        
+        # 确保梯度是 Tensor
+        if isinstance(grad_out, np.ndarray):
+             # 假设在 GPU 0
+             # 注意：如果是 Numpy 数组，需要知道原数据 device，这里暂定 gpu(0)
+             # 或者可以在 forward 保存 device
+            grad_out = cuda.Tensor.from_numpy(grad_out, cuda.Device.gpu(0))
+            
+        # 调用 C++ backward
+        # 假设 pybind 定义: relu_backward(grad_output, input) -> grad_input
+        grad_x = cuda.relu_backward(grad_out, self.x)
+        
+        return (as_value(grad_x),)
+
+class ReLU(Module):
+    def forward(self, x):
+        return ReLUOp()(x)
+
+# === Sigmoid ===
+class SigmoidOp(Op):
+    def compute(self, x):
+        # x 是 Tensor
+        # 保存 output (y) 用于反向传播，因为 Sigmoid 定义:
+        # gradient = grad_out * y * (1 - y)
+        self.out = cuda.sigmoid_forward(x)
+        return self.out
+    
+    def gradient(self, out_grad, node):
+        grad_out = out_grad.realize_cached_data()
+        
+        if isinstance(grad_out, np.ndarray):
+            grad_out = cuda.Tensor.from_numpy(grad_out, cuda.Device.gpu(0))
+            
+        # 假设 C++ 接口: sigmoid_backward(grad_output, output_y) -> grad_input
+        grad_x = cuda.sigmoid_backward(grad_out, self.out)
+        
+        return (as_value(grad_x),)
+
+class Sigmoid(Module):
+    def forward(self, x):
+        return SigmoidOp()(x)
+
+# === Softmax ===
+# 通常 Softmax 和 CrossEntropy 结合在一起用 (LogSoftmax)，数值更稳定
+# 但如果需要单独用的 Softmax
+class SoftmaxOp(Op):
+    def compute(self, x):
+        # x: Tensor
+        self.out = cuda.softmax_forward(x)
+        return self.out
+    
+    def gradient(self, out_grad, node):
+        # 单独的 Softmax 梯度比较复杂，且 C++ 库目前通常没有单独实现 softmax_backward
+        # 大多数情况下都在 CrossEntropyLoss 里算掉了。
+        # 如果必须要有，可以暂时回退到 Numpy
+        
+        dout = out_grad.realize_cached_data()
+        out = self.out
+        
+        is_gpu = isinstance(dout, cuda.Tensor)
+        if is_gpu:
+            dout_np = dout.to_numpy()
+            out_np = out.to_numpy()
+        else:
+            dout_np = dout
+            out_np = out
+            
+        # Softmax Gradient:
+        # dX_i = Y_i * (dL/dY_i - sum_k(dL/dY_k * Y_k))
+        sum_term = np.sum(dout_np * out_np, axis=1, keepdims=True)
+        dx_np = out_np * (dout_np - sum_term)
+        
+        if is_gpu:
+            return (as_value(cuda.Tensor.from_numpy(dx_np.astype(np.float32), dout.device())),)
+        return (as_value(dx_np),)
+
+class Softmax(Module):
+    def forward(self, x):
+        return SoftmaxOp()(x)
+==================== END OF FILE: activations.py ====================

@@ -1,0 +1,1245 @@
+Project Code Summary
+Generated from: /home/lukas/aicoding/deep_learning/cuda_src
+==================================================
+
+
+==================== START OF FILE: activations.h ====================
+#pragma once
+#include "tensor.h"
+
+// ReLU
+Tensor relu_forward(const Tensor& x);
+Tensor relu_backward(const Tensor& x, const Tensor& grad_y); 
+
+// Sigmoid
+Tensor sigmoid_forward(const Tensor& x);
+Tensor sigmoid_backward(const Tensor& y, const Tensor& grad_y); 
+==================== END OF FILE: activations.h ====================
+
+==================== START OF FILE: conv_layer.h ====================
+#ifndef CONV_LAYER_H
+#define CONV_LAYER_H
+
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+
+// 前向传播
+// input: [batch, in_c, h, w]
+// output: [batch, out_c, h_out, w_out]
+void forward_conv(float* d_input, float* d_output, float* d_weight, float* d_col_buffer,
+                  int batch_size, int in_channels, int out_channels, 
+                  int height, int width, int ksize, int stride, int padding,
+                  cublasHandle_t handle);
+
+// 反向传播
+void backward_conv(float* d_input, float* d_grad_output, float* d_weight, 
+                   float* d_col_buffer, float* d_grad_input, float* d_grad_weight,
+                   int batch_size, int in_channels, int out_channels, 
+                   int height, int width, int ksize, int stride, int padding,
+                   cublasHandle_t handle);
+
+#endif
+==================== END OF FILE: conv_layer.h ====================
+
+==================== START OF FILE: tensor.h ====================
+#pragma once
+#include <vector>
+#include <memory>
+#include <cstdint>
+#include <stdexcept>
+
+enum class DeviceType { CPU, GPU };
+
+struct Device {
+    DeviceType type;
+    int index;
+
+    Device() : type(DeviceType::CPU), index(0) {} 
+
+    Device(DeviceType t, int i = 0) : type(t), index(i) {}
+    static Device cpu() { return Device(DeviceType::CPU); }
+    static Device gpu(int i = 0) { return Device(DeviceType::GPU, i); }
+};
+
+class Tensor {
+public:
+    Tensor(const std::vector<int64_t>& shape, Device device);
+    ~Tensor();
+    
+    Tensor(Tensor&& other) noexcept;
+    Tensor& operator=(Tensor&& other) noexcept;
+    Tensor(const Tensor&) = delete;
+    Tensor& operator=(const Tensor&) = delete;
+
+    void fill(float v);
+    Tensor cpu() const;
+    Tensor gpu(int idx = 0) const;
+    
+    float* data();
+    const float* data() const;
+    
+    const std::vector<int64_t>& shape() const { return shape_; }
+    int64_t numel() const { return numel_; }
+    const Device& device() const { return device_; }
+
+private:
+    void allocate();
+    void deallocate();
+    void copy_to(Tensor& dst) const;
+
+    std::vector<int64_t> shape_;
+    int64_t numel_;
+    Device device_;
+    void* storage_ = nullptr;
+};
+==================== END OF FILE: tensor.h ====================
+
+==================== START OF FILE: activations.cu ====================
+#include "activations.h"
+#include <stdexcept>
+#include <cmath>
+#include <cstdio>
+#ifdef __CUDACC__
+  #include <cuda_runtime.h>
+  #define CUDA_CHECK(cmd) do { \
+    cudaError_t e = (cmd); \
+    if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e)); \
+  } while(0)
+#endif
+
+// ================= DEBUG HELPER START =================
+#ifdef __CUDACC__
+__global__ void debug_stats_kernel_act(const float* data, int n, float* out_stats) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        float sum = 0.0f;
+        float max_val = -1e9f;
+        int nans = 0;
+        for(int i=0; i<n; i++) {
+            float v = data[i];
+            if (isnan(v)) nans++;
+            else {
+                sum += (v > 0 ? v : -v); // abs sum
+                if(v > max_val) max_val = v;
+            }
+        }
+        out_stats[0] = sum / (n > 0 ? n : 1);
+        out_stats[1] = max_val;
+        out_stats[2] = (float)nans;
+    }
+}
+
+static void print_debug_stats_act(const char* tag, const float* d_data, int size) {
+    if (size <= 0) return;
+    float* d_stats;
+    float h_stats[3];
+    cudaMalloc(&d_stats, 3 * sizeof(float));
+    debug_stats_kernel_act<<<1, 1>>>(d_data, size, d_stats);
+    cudaDeviceSynchronize(); 
+    cudaMemcpy(h_stats, d_stats, 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    printf("[%s] Size=%d, AvgAbs=%.6f, Max=%.6f, NaNs=%d\n", tag, size, h_stats[0], h_stats[1], (int)h_stats[2]);
+    cudaFree(d_stats);
+}
+#endif
+// ================= DEBUG HELPER END =================
+
+//  CPU 实现 
+static Tensor relu_forward_cpu(const Tensor& x) {
+    Tensor y(x.shape(), Device::cpu());
+    const float* px = x.data();
+    float* py = y.data();
+    for (int64_t i = 0; i < x.numel(); ++i) py[i] = px[i] > 0.f ? px[i] : 0.f;
+    return y;
+}
+
+static Tensor relu_backward_cpu(const Tensor& x, const Tensor& gy) {
+    if (x.numel() != gy.numel()) throw std::runtime_error("size mismatch");
+    Tensor gx(x.shape(), Device::cpu());
+    const float* px = x.data();
+    const float* pgy = gy.data();
+    float* pgx = gx.data();
+    for (int64_t i = 0; i < x.numel(); ++i) pgx[i] = (px[i] > 0.f) ? pgy[i] : 0.f;
+    return gx;
+}
+
+static Tensor sigmoid_forward_cpu(const Tensor& x) {
+    Tensor y(x.shape(), Device::cpu());
+    const float* px = x.data();
+    float* py = y.data();
+    for (int64_t i = 0; i < x.numel(); ++i) {
+        float v = px[i];
+        py[i] = 1.0f / (1.0f + std::exp(-v));
+    }
+    return y;
+}
+
+static Tensor sigmoid_backward_cpu(const Tensor& y, const Tensor& gy) {
+    if (y.numel() != gy.numel()) throw std::runtime_error("size mismatch");
+    Tensor gx(y.shape(), Device::cpu());
+    const float* py = y.data();
+    const float* pgy = gy.data();
+    float* pgx = gx.data();
+    for (int64_t i = 0; i < y.numel(); ++i) {
+        pgx[i] = pgy[i] * py[i] * (1.0f - py[i]); 
+    }
+    return gx;
+}
+
+//  CUDA 实现 
+#ifdef __CUDACC__
+__global__ void relu_fwd_kernel(const float* x, float* y, int64_t n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = x[i] > 0.f ? x[i] : 0.f;
+}
+
+__global__ void relu_bwd_kernel(const float* x, const float* gy, float* gx, int64_t n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) gx[i] = (x[i] > 0.f) ? gy[i] : 0.f;
+}
+
+__global__ void sigmoid_fwd_kernel(const float* x, float* y, int64_t n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float v = x[i];
+        y[i] = 1.0f / (1.0f + __expf(-v));
+    }
+}
+
+__global__ void sigmoid_bwd_kernel(const float* y, const float* gy, float* gx, int64_t n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        gx[i] = gy[i] * y[i] * (1.0f - y[i]);
+    }
+}
+
+static int grid_for(int64_t n) {
+    const int block = 256;
+    return static_cast<int>((n + block - 1) / block);
+}
+
+static Tensor relu_forward_gpu(const Tensor& x) {
+    Tensor y(x.shape(), x.device());
+    int64_t n = x.numel();
+    if (n == 0) return y;
+    CUDA_CHECK(cudaSetDevice(x.device().index));
+    relu_fwd_kernel<<<grid_for(n), 256>>>(x.data(), y.data(), n);
+    CUDA_CHECK(cudaGetLastError());
+
+    print_debug_stats_act("ReLU Fwd: Output", y.data(), n);
+    return y;
+}
+
+static Tensor relu_backward_gpu(const Tensor& x, const Tensor& gy) {
+    Tensor gx(x.shape(), x.device());
+    int64_t n = x.numel();
+    CUDA_CHECK(cudaSetDevice(x.device().index));
+
+    print_debug_stats_act("ReLU Bwd: Grad Output (Incoming)", gy.data(), n);
+
+    relu_bwd_kernel<<<grid_for(n), 256>>>(x.data(), gy.data(), gx.data(), n);
+    CUDA_CHECK(cudaGetLastError());
+
+    print_debug_stats_act("ReLU Bwd: Grad Input (Result)", gx.data(), n);
+   
+    return gx;
+}
+
+static Tensor sigmoid_forward_gpu(const Tensor& x) {
+    Tensor y(x.shape(), x.device());
+    int64_t n = x.numel();
+    CUDA_CHECK(cudaSetDevice(x.device().index));
+    sigmoid_fwd_kernel<<<grid_for(n), 256>>>(x.data(), y.data(), n);
+    CUDA_CHECK(cudaGetLastError());
+    return y;
+}
+
+static Tensor sigmoid_backward_gpu(const Tensor& y, const Tensor& gy) {
+    Tensor gx(y.shape(), y.device());
+    int64_t n = y.numel();
+    CUDA_CHECK(cudaSetDevice(y.device().index));
+    sigmoid_bwd_kernel<<<grid_for(n), 256>>>(y.data(), gy.data(), gx.data(), n);
+    CUDA_CHECK(cudaGetLastError());
+    return gx;
+}
+#endif
+
+Tensor relu_forward(const Tensor& x) {
+    if (x.device().type == DeviceType::CPU) return relu_forward_cpu(x);
+#ifdef __CUDACC__
+    return relu_forward_gpu(x);
+#else
+    throw std::runtime_error("CUDA not available");
+#endif
+}
+
+Tensor relu_backward(const Tensor& x, const Tensor& grad_y) {
+    if (x.device().type != grad_y.device().type) throw std::runtime_error("device mismatch");
+    if (x.numel() != grad_y.numel()) throw std::runtime_error("size mismatch");
+    if (x.device().type == DeviceType::CPU) return relu_backward_cpu(x, grad_y);
+#ifdef __CUDACC__
+    return relu_backward_gpu(x, grad_y);
+#else
+    throw std::runtime_error("CUDA not available");
+#endif
+}
+
+Tensor sigmoid_forward(const Tensor& x) {
+    if (x.device().type == DeviceType::CPU) return sigmoid_forward_cpu(x);
+#ifdef __CUDACC__
+    return sigmoid_forward_gpu(x);
+#else
+    throw std::runtime_error("CUDA not available");
+#endif
+}
+
+Tensor sigmoid_backward(const Tensor& y, const Tensor& grad_y) {
+    if (y.device().type != grad_y.device().type) throw std::runtime_error("device mismatch");
+    if (y.numel() != grad_y.numel()) throw std::runtime_error("size mismatch");
+    if (y.device().type == DeviceType::CPU) return sigmoid_backward_cpu(y, grad_y);
+#ifdef __CUDACC__
+    return sigmoid_backward_gpu(y, grad_y);
+#else
+    throw std::runtime_error("CUDA not available");
+#endif
+}
+==================== END OF FILE: activations.cu ====================
+
+==================== START OF FILE: elementwise.h ====================
+#pragma once
+#include "tensor.h"
+
+void elementwise_add(const Tensor& a, const Tensor& b, Tensor& c);
+void elementwise_add_backward(const Tensor& grad_out, Tensor& grad_a, Tensor& grad_b);
+==================== END OF FILE: elementwise.h ====================
+
+==================== START OF FILE: elementwise.cu ====================
+#include "elementwise.h"
+#include <cuda_runtime.h>
+#include <stdexcept>
+
+#define CUDA_CHECK(cmd) do { \
+    cudaError_t e = (cmd); \
+    if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e)); \
+} while(0)
+
+__global__ void add_kernel(const float* a, const float* b, float* c, int64_t n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        c[i] = a[i] + b[i];
+    }
+}
+
+__global__ void add_backward_kernel(const float* grad_out, float* grad_a, float* grad_b, int64_t n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        grad_a[i] = grad_out[i];
+        grad_b[i] = grad_out[i];
+    }
+}
+
+void elementwise_add(const Tensor& a, const Tensor& b, Tensor& c) {
+    if (a.numel() != b.numel() || a.numel() != c.numel()) {
+        throw std::runtime_error("Tensor size mismatch in elementwise_add");
+    }
+    
+    if (a.device().type != DeviceType::GPU || 
+        b.device().type != DeviceType::GPU || 
+        c.device().type != DeviceType::GPU) {
+        throw std::runtime_error("elementwise_add requires GPU tensors");
+    }
+    
+    int64_t n = a.numel();
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    
+    CUDA_CHECK(cudaSetDevice(a.device().index));
+    add_kernel<<<blocks, threads>>>(a.data(), b.data(), c.data(), n);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+void elementwise_add_backward(const Tensor& grad_out, Tensor& grad_a, Tensor& grad_b) {
+    if (grad_out.device().type != DeviceType::GPU) {
+        throw std::runtime_error("elementwise_add_backward requires GPU tensor");
+    }
+    
+    int64_t n = grad_out.numel();
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    
+    CUDA_CHECK(cudaSetDevice(grad_out.device().index));
+    add_backward_kernel<<<blocks, threads>>>(grad_out.data(), grad_a.data(), grad_b.data(), n);
+    CUDA_CHECK(cudaGetLastError());
+}
+==================== END OF FILE: elementwise.cu ====================
+
+==================== START OF FILE: tensor.cu ====================
+#include "tensor.h"
+#include <numeric>
+#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <cuda_runtime.h>
+
+#define CUDA_CHECK(cmd) do { \
+    cudaError_t e = (cmd); \
+    if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e)); \
+} while(0)
+
+static int64_t product(const std::vector<int64_t>& v) {
+    if (v.empty()) return 0;
+    int64_t p = 1;
+    for (auto x : v) p *= x;
+    return p;
+}
+
+Tensor::Tensor(const std::vector<int64_t>& shape, Device device)
+: shape_(shape), numel_(product(shape)), device_(device) {
+    allocate();
+}
+
+Tensor::~Tensor() { deallocate(); }
+
+Tensor::Tensor(Tensor&& other) noexcept {
+    shape_   = std::move(other.shape_);
+    numel_   = other.numel_;
+    device_  = other.device_;
+    storage_ = other.storage_;
+    other.numel_ = 0;
+    other.storage_ = nullptr;
+}
+
+Tensor& Tensor::operator=(Tensor&& other) noexcept {
+    if (this != &other) {
+        deallocate();
+        shape_   = std::move(other.shape_);
+        numel_   = other.numel_;
+        device_  = other.device_;
+        storage_ = other.storage_;
+        other.numel_ = 0;
+        other.storage_ = nullptr;
+    }
+    return *this;
+}
+
+void Tensor::allocate() {
+    if (numel_ <= 0) return;
+    size_t nbytes = static_cast<size_t>(numel_) * sizeof(float);
+    if (device_.type == DeviceType::CPU) {
+        storage_ = std::malloc(nbytes);
+        if (!storage_) throw std::bad_alloc();
+    } else {
+        CUDA_CHECK(cudaSetDevice(device_.index));
+        CUDA_CHECK(cudaMalloc(&storage_, nbytes));
+    }
+}
+
+void Tensor::deallocate() {
+    if (!storage_) return;
+    if (device_.type == DeviceType::CPU) {
+        std::free(storage_);
+    } else {
+        CUDA_CHECK(cudaSetDevice(device_.index));
+        CUDA_CHECK(cudaFree(storage_));
+    }
+    storage_ = nullptr;
+}
+
+float* Tensor::data() { return reinterpret_cast<float*>(storage_); }
+const float* Tensor::data() const { return reinterpret_cast<const float*>(storage_); }
+
+void Tensor::copy_to(Tensor& dst) const {
+    if (numel_ != dst.numel_) throw std::runtime_error("size mismatch in copy_to");
+    size_t nbytes = static_cast<size_t>(numel_) * sizeof(float);
+
+    if (device_.type == DeviceType::CPU && dst.device_.type == DeviceType::CPU) {
+        std::memcpy(dst.storage_, storage_, nbytes);
+    } else if (device_.type == DeviceType::CPU && dst.device_.type == DeviceType::GPU) {
+        CUDA_CHECK(cudaSetDevice(dst.device_.index));
+        CUDA_CHECK(cudaMemcpy(dst.storage_, storage_, nbytes, cudaMemcpyHostToDevice));
+    } else if (device_.type == DeviceType::GPU && dst.device_.type == DeviceType::CPU) {
+        CUDA_CHECK(cudaSetDevice(device_.index));
+        CUDA_CHECK(cudaMemcpy(dst.storage_, storage_, nbytes, cudaMemcpyDeviceToHost));
+    } else if (device_.type == DeviceType::GPU && dst.device_.type == DeviceType::GPU) {
+        CUDA_CHECK(cudaSetDevice(device_.index));
+        CUDA_CHECK(cudaMemcpy(dst.storage_, storage_, nbytes, cudaMemcpyDeviceToDevice));
+    }
+}
+
+Tensor Tensor::cpu() const {
+    Tensor out(shape_, Device::cpu());
+    if (numel_ > 0) copy_to(out);
+    return out;
+}
+
+Tensor Tensor::gpu(int idx) const {
+    Tensor out(shape_, Device::gpu(idx));
+    if (numel_ > 0) copy_to(out);
+    return out;
+}
+
+void Tensor::fill(float v) {
+    if (numel_ <= 0) return;
+    if (device_.type == DeviceType::CPU) {
+        float* p = data();
+        for (int64_t i = 0; i < numel_; ++i) p[i] = v;
+    } else {
+        std::vector<float> tmp(static_cast<size_t>(numel_), v);
+        Tensor host(shape_, Device::cpu());
+        std::memcpy(host.data(), tmp.data(), tmp.size() * sizeof(float));
+        host.copy_to(*this);
+    }
+}
+==================== END OF FILE: tensor.cu ====================
+
+==================== START OF FILE: layers.h ====================
+#pragma once
+#include "tensor.h"
+
+// 1. Activation: Sigmoid
+void sigmoid_forward(const Tensor& input, Tensor& output);
+// Sigmoid Backward: grad_input = grad_output * y * (1-y)
+void sigmoid_backward(const Tensor& output, const Tensor& grad_output, Tensor& grad_input);
+
+// 2. Activation: ReLU
+void relu_forward(const Tensor& input, Tensor& output);
+void relu_backward(const Tensor& input, const Tensor& grad_output, Tensor& grad_input);
+
+// 3. Linear (Fully Connected)
+// Y = X * W^T + b
+void linear_forward(const Tensor& input, const Tensor& weight, const Tensor& bias, Tensor& output);
+// Linear Backward involves computing dX, dW, db
+void linear_backward(const Tensor& input, const Tensor& weight, const Tensor& grad_output, 
+                     Tensor& grad_input, Tensor& grad_weight, Tensor& grad_bias);
+
+// 4. Convolution
+void conv2d_forward(const Tensor& input, const Tensor& weight, Tensor& output, int stride, int padding);
+
+// 5. Max Pooling
+void maxpool_forward(const Tensor& input, Tensor& output, Tensor& mask, 
+                     int k, int s, int p);
+void maxpool_backward(const Tensor& grad_output, const Tensor& mask, Tensor& grad_input, 
+                      int k, int s, int p);
+
+// 6. Softmax
+void softmax_forward(const Tensor& input, Tensor& output);
+
+// 7. Cross Entropy Loss
+float cross_entropy_loss(const Tensor& probs, const Tensor& labels);
+void cross_entropy_backward(const Tensor& probs, const Tensor& labels, Tensor& grad_input);
+==================== END OF FILE: layers.h ====================
+
+==================== START OF FILE: layers.cu ====================
+#include "layers.h"
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include <cmath>
+#include <cfloat>
+#include <vector>
+#include <cstdio>
+
+// ================= DEBUG HELPER START =================
+__global__ void debug_stats_kernel_layers(const float* data, int n, float* out_stats) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        float sum = 0.0f;
+        float max_val = -1e9f;
+        int nans = 0;
+        for(int i=0; i<n; i++) {
+            float v = data[i];
+            if (isnan(v)) nans++;
+            else {
+                sum += (v > 0 ? v : -v); // abs sum
+                if(v > max_val) max_val = v;
+            }
+        }
+        out_stats[0] = sum / (n > 0 ? n : 1);
+        out_stats[1] = max_val;
+        out_stats[2] = (float)nans;
+    }
+}
+
+static void print_debug_stats_layers(const char* tag, const float* d_data, int size) {
+    if (size <= 0) return;
+    float* d_stats;
+    float h_stats[3];
+    cudaMalloc(&d_stats, 3 * sizeof(float));
+    debug_stats_kernel_layers<<<1, 1>>>(d_data, size, d_stats);
+    cudaDeviceSynchronize(); 
+    cudaMemcpy(h_stats, d_stats, 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    printf("[%s] Size=%d, AvgAbs=%.6f, Max=%.6f, NaNs=%d\n", tag, size, h_stats[0], h_stats[1], (int)h_stats[2]);
+    cudaFree(d_stats);
+}
+// ================= DEBUG HELPER END =================
+
+inline void get_grid(int n, int& blocks, int& threads) {
+    threads = 256;
+    blocks = (n + threads - 1) / threads;
+}
+
+// ==========================================
+// 1. Sigmoid
+// ==========================================
+__global__ void sigmoid_fwd_kernel(int n, const float* x, float* y) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = 1.0f / (1.0f + expf(-x[i]));
+}
+
+void sigmoid_forward(const Tensor& input, Tensor& output) {
+    int n = input.numel();
+    int b, t; get_grid(n, b, t);
+    sigmoid_fwd_kernel<<<b, t>>>(n, input.data(), output.data());
+}
+
+__global__ void sigmoid_bwd_kernel(int n, const float* y, const float* grad_y, float* grad_x) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float y_val = y[i];
+        grad_x[i] = grad_y[i] * y_val * (1.0f - y_val);
+    }
+}
+
+void sigmoid_backward(const Tensor& output, const Tensor& grad_output, Tensor& grad_input) {
+    int n = output.numel();
+    int b, t; get_grid(n, b, t);
+    sigmoid_bwd_kernel<<<b, t>>>(n, output.data(), grad_output.data(), grad_input.data());
+}
+
+// ==========================================
+// 2. ReLU
+// ==========================================
+__global__ void relu_fwd_kernel(int n, const float* x, float* y) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) y[i] = x[i] > 0.0f ? x[i] : 0.0f;
+}
+
+void relu_forward(const Tensor& input, Tensor& output) {
+    int n = input.numel();
+    int b, t; get_grid(n, b, t);
+    relu_fwd_kernel<<<b, t>>>(n, input.data(), output.data());
+}
+
+__global__ void relu_bwd_kernel(int n, const float* x, const float* grad_y, float* grad_x) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) grad_x[i] = x[i] > 0.0f ? grad_y[i] : 0.0f;
+}
+
+void relu_backward(const Tensor& input, const Tensor& grad_output, Tensor& grad_input) {
+    int n = input.numel();
+    int b, t; get_grid(n, b, t);
+    relu_bwd_kernel<<<b, t>>>(n, input.data(), grad_output.data(), grad_input.data());
+}
+
+// ==========================================
+// 3. Linear (Fully Connected)
+// ==========================================
+__global__ void add_bias_kernel(const float* bias, float* output, int N, int OutFeatures) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N * OutFeatures) {
+        int col = idx % OutFeatures;
+        output[idx] += bias[col];
+    }
+}
+
+void linear_forward(const Tensor& input, const Tensor& weight, const Tensor& bias, Tensor& output) {
+    int N = input.shape()[0];
+    int InF = input.shape()[1];
+    int OutF = weight.shape()[0];
+
+    //print_debug_stats_layers("Linear Fwd: Input", input.data(), input.numel());
+    //print_debug_stats_layers("Linear Fwd: Weight", weight.data(), weight.numel());
+
+    cublasHandle_t handle; cublasCreate(&handle);
+    float alpha = 1.0f, beta = 0.0f;
+
+    cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                OutF, N, InF,
+                &alpha,
+                weight.data(), InF,  
+                input.data(), InF,   
+                &beta,
+                output.data(), OutF);
+
+    int b, t; get_grid(N * OutF, b, t);
+    add_bias_kernel<<<b, t>>>(bias.data(), output.data(), N, OutF);
+    
+    //print_debug_stats_layers("Linear Fwd: Output", output.data(), output.numel());
+    cublasDestroy(handle);
+}
+
+__global__ void reduce_sum_bias_kernel(const float* grad_out, float* grad_bias, int N, int OutF) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col < OutF) {
+        float sum = 0.0f;
+        for (int i = 0; i < N; ++i) sum += grad_out[i * OutF + col];
+        grad_bias[col] = sum;
+    }
+}
+
+void linear_backward(const Tensor& input, const Tensor& weight, const Tensor& grad_output, 
+                     Tensor& grad_input, Tensor& grad_weight, Tensor& grad_bias) {
+    int N = input.shape()[0];
+    int InF = input.shape()[1];
+    int OutF = weight.shape()[0];
+    
+    cublasHandle_t handle; cublasCreate(&handle);
+    float alpha = 1.0f, beta = 0.0f;
+
+    //print_debug_stats_layers("Linear Bwd: Grad Output", grad_output.data(), grad_output.numel());
+
+    // 1. dInput = dOutput * W
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                InF, N, OutF,
+                &alpha,
+                weight.data(), InF,
+                grad_output.data(), OutF,
+                &beta,
+                grad_input.data(), InF);
+
+    // 2. dWeight = dOutput^T * Input
+    cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                InF, OutF, N,
+                &alpha,
+                input.data(), InF,
+                grad_output.data(), OutF,
+                &beta,
+                grad_weight.data(), InF);
+
+    // 3. dBias
+    int b, t; get_grid(OutF, b, t);
+    reduce_sum_bias_kernel<<<b, t>>>(grad_output.data(), grad_bias.data(), N, OutF);
+
+    //print_debug_stats_layers("Linear Bwd: Grad Input", grad_input.data(), grad_input.numel());
+    //print_debug_stats_layers("Linear Bwd: Grad Weight", grad_weight.data(), grad_weight.numel());
+    
+    cublasDestroy(handle);
+}
+
+// ==========================================
+// 4. Convolution (Only wrappers here if not using conv_layer.cu directly)
+// ... keeping other functions as is ... 
+// (由于 conv2d_forward/backward 主要在 conv_layer.cu 实现了，这里可能是遗留代码或重复定义)
+// (如果你之前的 layers.cu 里还有 conv 代码，保留原样即可，如果它是调用 conv_layer 的接口)
+// 根据你提供的 layers.cu，它里面确实有 conv2d_forward 的实现，这可能是重复的根源之一。
+// **注意**：如果 conv_layer.cu 和 layers.cu 都有 conv2d_forward，链接也会报错。
+// 我这里保留你 layers.cu 的内容不变，只改 debug 函数名。
+// ==========================================
+
+__global__ void im2col_kernel_layers(const int n, const float* data_im,
+    const int height, const int width, const int channels,
+    const int kernel_h, const int kernel_w,
+    const int pad_h, const int pad_w,
+    const int stride_h, const int stride_w,
+    const int height_col, const int width_col,
+    float* data_col) {
+    
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= n) return;
+
+    int w_out = index % width_col;
+    int h_index = index / width_col;
+    int h_out = h_index % height_col;
+    int channel_in = h_index / height_col;
+    int channel_out = channel_in * kernel_h * kernel_w;
+    int h_in = h_out * stride_h - pad_h;
+    int w_in = w_out * stride_w - pad_w;
+
+    float* data_col_ptr = data_col;
+    data_col_ptr += (channel_out * height_col * width_col + h_out * width_col + w_out);
+    const float* data_im_ptr = data_im + (channel_in * height * width);
+
+    for (int i = 0; i < kernel_h; ++i) {
+        for (int j = 0; j < kernel_w; ++j) {
+            int h = h_in + i;
+            int w = w_in + j;
+            *data_col_ptr = (h >= 0 && w >= 0 && h < height && w < width) ?
+                data_im_ptr[h * width + w] : 0;
+            data_col_ptr += height_col * width_col;
+        }
+    }
+}
+
+__global__ void col2im_kernel_layers(const int n, const float* data_col,
+                              const int height, const int width, const int channels,
+                              const int kernel_h, const int kernel_w,
+                              const int pad_h, const int pad_w,
+                              const int stride_h, const int stride_w,
+                              const int height_col, const int width_col,
+                              float* data_im) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= n) return;
+
+    float val = 0;
+    int w = index % width + pad_w;
+    int h = (index / width) % height + pad_h;
+    int c = index / (width * height);
+
+    int w_col_start = (w < kernel_w) ? 0 : (w - kernel_w) / stride_w + 1;
+    int w_col_end = min(w / stride_w + 1, width_col);
+    int h_col_start = (h < kernel_h) ? 0 : (h - kernel_h) / stride_h + 1;
+    int h_col_end = min(h / stride_h + 1, height_col);
+
+    for (int h_col = h_col_start; h_col < h_col_end; ++h_col) {
+        for (int w_col = w_col_start; w_col < w_col_end; ++w_col) {
+            int h_k = h - h_col * stride_h;
+            int w_k = w - w_col * stride_w;
+            if (h_k % 1 == 0 && w_k % 1 == 0) { 
+                int data_col_index = (((c * kernel_h + h_k) * kernel_w + w_k) * height_col + h_col) * width_col + w_col;
+                val += data_col[data_col_index];
+            }
+        }
+    }
+    data_im[index] = val;
+}
+
+void conv2d_forward(const Tensor& input, const Tensor& weight, Tensor& output, int stride, int padding) {
+    int batch = input.shape()[0];
+    int in_c = input.shape()[1];
+    int in_h = input.shape()[2];
+    int in_w = input.shape()[3];
+    int out_c = weight.shape()[0];
+    int k_h = weight.shape()[2];
+    int k_w = weight.shape()[3];
+    int out_h = output.shape()[2];
+    int out_w = output.shape()[3];
+
+    cublasHandle_t handle; cublasCreate(&handle);
+    float* d_col;
+    cudaMalloc(&d_col, in_c * k_h * k_w * out_h * out_w * sizeof(float));
+
+    for (int n = 0; n < batch; ++n) {
+        int num_kernels = in_c * out_h * out_w;
+        int b, t; get_grid(num_kernels, b, t);
+        im2col_kernel_layers<<<b, t>>>(num_kernels, input.data() + n*in_c*in_h*in_w, 
+                                in_h, in_w, in_c, k_h, k_w, padding, padding, stride, stride,
+                                out_h, out_w, d_col);
+        
+        float alpha = 1.0f, beta = 0.0f;
+        int m = out_h * out_w;
+        int k = in_c * k_h * k_w;
+        int n_dim = out_c;
+        
+        cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                    m, n_dim, k,
+                    &alpha, 
+                    d_col, m,
+                    weight.data(), k, 
+                    &beta, 
+                    output.data() + n*out_c*out_h*out_w, m);
+    }
+    cudaFree(d_col);
+    cublasDestroy(handle);
+}
+
+void conv2d_backward(const Tensor& input, const Tensor& weight, const Tensor& grad_output, 
+                     Tensor& grad_input, Tensor& grad_weight, int stride, int padding) {
+    int batch = input.shape()[0];
+    int in_c = input.shape()[1];
+    int in_h = input.shape()[2];
+    int in_w = input.shape()[3];
+    int out_c = weight.shape()[0];
+    int k_h = weight.shape()[2];
+    int k_w = weight.shape()[3];
+    int out_h = grad_output.shape()[2];
+    int out_w = grad_output.shape()[3];
+
+    cublasHandle_t handle; cublasCreate(&handle);
+    float* d_col;
+    int col_size = in_c * k_h * k_w * out_h * out_w;
+    cudaMalloc(&d_col, col_size * sizeof(float));
+
+    int m = out_h * out_w;
+    int k = in_c * k_h * k_w;
+    int n_dim = out_c; 
+
+    float alpha = 1.0f, beta = 0.0f, beta_one = 1.0f;
+
+    grad_weight.fill(0.0f); 
+
+    for (int n = 0; n < batch; ++n) {
+        int num_kernels = in_c * out_h * out_w;
+        int b, t; get_grid(num_kernels, b, t);
+        im2col_kernel_layers<<<b, t>>>(num_kernels, input.data() + n*in_c*in_h*in_w, 
+                                in_h, in_w, in_c, k_h, k_w, padding, padding, stride, stride,
+                                out_h, out_w, d_col);
+        cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                    k, n_dim, m,
+                    &alpha,
+                    d_col, m,
+                    grad_output.data() + n*out_c*m, m,
+                    &beta_one, 
+                    grad_weight.data(), k);
+
+        cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                    m, k, n_dim,
+                    &alpha,
+                    grad_output.data() + n*out_c*m, m,
+                    weight.data(), k,
+                    &beta,
+                    d_col, m);
+        
+        int num_im = in_c * in_h * in_w; 
+        get_grid(num_im, b, t);
+        col2im_kernel_layers<<<b, t>>>(num_im, d_col, in_h, in_w, in_c, k_h, k_w, 
+                                padding, padding, stride, stride, out_h, out_w, 
+                                grad_input.data() + n*in_c*in_h*in_w);
+    }
+    cudaFree(d_col);
+    cublasDestroy(handle);
+}
+
+// ... Max Pooling, Softmax etc ...
+// (保持剩余部分不变)
+
+__global__ void maxpool_fwd_kernel(int nthreads, const float* bottom, int c, int h, int w, 
+                                   int ph, int pw, int kh, int kw, int sh, int sw, int pad,
+                                   float* top, float* mask) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= nthreads) return;
+    int pw_idx = idx % pw;
+    int ph_idx = (idx / pw) % ph;
+    int c_idx = (idx / pw / ph) % c;
+    int n_idx = idx / pw / ph / c;
+
+    int hstart = ph_idx * sh - pad;
+    int wstart = pw_idx * sw - pad;
+    int hend = min(hstart + kh, h);
+    int wend = min(wstart + kw, w);
+    hstart = max(hstart, 0); wstart = max(wstart, 0);
+
+    float maxval = -FLT_MAX;
+    int maxidx = -1;
+    const float* src = bottom + (n_idx*c + c_idx)*h*w;
+    for (int i = hstart; i < hend; ++i) {
+        for (int j = wstart; j < wend; ++j) {
+            if (src[i*w + j] > maxval) {
+                maxval = src[i*w + j];
+                maxidx = i*w + j;
+            }
+        }
+    }
+    top[idx] = maxval;
+    mask[idx] = (float)(maxidx + (n_idx*c + c_idx)*h*w);
+}
+
+void maxpool_forward(const Tensor& input, Tensor& output, Tensor& mask, int k, int s, int p) {
+    int n = output.numel();
+    int b, t; get_grid(n, b, t);
+    maxpool_fwd_kernel<<<b, t>>>(n, input.data(), input.shape()[1], input.shape()[2], input.shape()[3],
+                                 output.shape()[2], output.shape()[3], k, k, s, s, p, 
+                                 output.data(), mask.data());
+}
+
+__global__ void maxpool_bwd_kernel(int n, const float* top_diff, const float* mask, float* bottom_diff) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) atomicAdd(bottom_diff + (int)mask[i], top_diff[i]);
+}
+
+void maxpool_backward(const Tensor& grad_output, const Tensor& mask, Tensor& grad_input, int k, int s, int p) {
+    grad_input.fill(0.0f);
+    int n = grad_output.numel();
+    int b, t; get_grid(n, b, t);
+    maxpool_bwd_kernel<<<b, t>>>(n, grad_output.data(), mask.data(), grad_input.data());
+}
+
+__global__ void softmax_kernel(const float* x, float* y, int N, int C) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        const float* row_x = x + i*C;
+        float* row_y = y + i*C;
+        float maxv = -FLT_MAX;
+        for(int j=0; j<C; ++j) maxv = max(maxv, row_x[j]);
+        float sum = 0.0f;
+        for(int j=0; j<C; ++j) {
+            row_y[j] = expf(row_x[j] - maxv);
+            sum += row_y[j];
+        }
+        for(int j=0; j<C; ++j) row_y[j] /= sum;
+    }
+}
+
+void softmax_forward(const Tensor& input, Tensor& output) {
+    int N = input.shape()[0];
+    int C = input.shape()[1];
+    int b, t; get_grid(N, b, t);
+    softmax_kernel<<<b, t>>>(input.data(), output.data(), N, C);
+}
+
+__global__ void ce_kernel(const float* p, const float* label, float* loss, int N, int C) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        int l = (int)label[i];
+        atomicAdd(loss, -logf(p[i*C + l] + 1e-7f));
+    }
+}
+
+float cross_entropy_loss(const Tensor& probs, const Tensor& labels) {
+    int N = probs.shape()[0];
+    int C = probs.shape()[1];
+    float h_loss = 0.0f;
+    float* d_loss; cudaMalloc(&d_loss, sizeof(float));
+    cudaMemcpy(d_loss, &h_loss, sizeof(float), cudaMemcpyHostToDevice);
+    
+    int b, t; get_grid(N, b, t);
+    ce_kernel<<<b, t>>>(probs.data(), labels.data(), d_loss, N, C);
+    
+    cudaMemcpy(&h_loss, d_loss, sizeof(float), cudaMemcpyDeviceToHost);
+    cudaFree(d_loss);
+    return h_loss / N;
+}
+
+__global__ void ce_bwd_kernel(const float* p, const float* label, float* grad, int N, int C) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < N*C) {
+        int n = idx / C;
+        int c = idx % C;
+        int l = (int)label[n];
+        grad[idx] = (p[idx] - (c == l ? 1.0f : 0.0f)) / N;
+    }
+}
+
+void cross_entropy_backward(const Tensor& probs, const Tensor& labels, Tensor& grad_input) {
+    int N = probs.shape()[0];
+    int C = probs.shape()[1];
+    int b, t; get_grid(N*C, b, t);
+    ce_bwd_kernel<<<b, t>>>(probs.data(), labels.data(), grad_input.data(), N, C);
+}
+==================== END OF FILE: layers.cu ====================
+
+==================== START OF FILE: conv_layer.cu ====================
+#include "conv_layer.h"
+#include <iostream>
+#include <cstdio>
+#include <vector>
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+
+#define CHECK_CUDA(call) \
+do { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        printf("CUDA Error at %s:%d - %s\n", __FILE__, __LINE__, cudaGetErrorString(err)); \
+    } \
+} while(0)
+
+// =========================================================================
+// Debug Helpers (Unique name to avoid linker errors)
+// =========================================================================
+
+__global__ void debug_stats_kernel_conv(const float* data, int n, float* out_stats) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        float sum = 0.0f;
+        float max_val = -1e9f;
+        int nans = 0;
+        for(int i=0; i<n; i++) {
+            float v = data[i];
+            if (isnan(v)) nans++;
+            else {
+                sum += (v > 0 ? v : -v); // abs sum
+                if(v > max_val) max_val = v;
+            }
+        }
+        out_stats[0] = sum / (n > 0 ? n : 1);
+        out_stats[1] = max_val;
+        out_stats[2] = (float)nans;
+    }
+}
+
+static void print_debug_stats_conv(const char* tag, const float* d_data, int size) {
+    if (size <= 0) return; 
+    float* d_stats;
+    float h_stats[3];
+    cudaMalloc(&d_stats, 3 * sizeof(float));
+    debug_stats_kernel_conv<<<1, 1>>>(d_data, size, d_stats);
+    cudaDeviceSynchronize();
+    cudaMemcpy(h_stats, d_stats, 3 * sizeof(float), cudaMemcpyDeviceToHost);
+    printf("[%s] Size=%d, AvgAbs=%.6f, Max=%.6f, NaNs=%d\n", tag, size, h_stats[0], h_stats[1], (int)h_stats[2]);
+    cudaFree(d_stats);
+}
+
+// =========================================================================
+// IM2COL & COL2IM Implementation
+// =========================================================================
+
+__global__ void im2col_kernel(const int n, const float* data_im, 
+                              const int height, const int width, const int ksize, 
+                              const int pad, const int stride, 
+                              const int height_col, const int width_col, 
+                              float* data_col) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= n) return;
+
+    int m = height_col * width_col; 
+    
+    int spatial_idx = index % m;
+    int kernel_idx = index / m;
+    
+    int w_out = spatial_idx % width_col;
+    int h_out = spatial_idx / width_col;
+    
+    int k_sq = ksize * ksize;
+    int channel_in = kernel_idx / k_sq;
+    int k_rem = kernel_idx % k_sq;
+    int u = k_rem / ksize;
+    int v = k_rem % ksize;
+    
+    int h_in = h_out * stride - pad + u;
+    int w_in = w_out * stride - pad + v;
+    
+    float val = 0.0f;
+    if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
+        val = data_im[(channel_in * height + h_in) * width + w_in];
+    }
+    
+    data_col[index] = val;
+}
+
+void im2col_gpu(float* d_input, float* d_col_buffer,
+                int in_channels, int height, int width, int ksize, int padding, 
+                int stride, int height_out, int width_out) {
+    int m = height_out * width_out;
+    int k = in_channels * ksize * ksize;
+    int num_kernels = m * k;
+    
+    int threads = 256;
+    int blocks = (num_kernels + threads - 1) / threads;
+    
+    im2col_kernel<<<blocks, threads>>>(num_kernels, d_input, height, width, ksize, padding, 
+                                       stride, height_out, width_out, d_col_buffer);
+}
+
+__global__ void col2im_kernel(const int n, const float* data_col,
+                              const int height, const int width, const int ksize, 
+                              const int pad, const int stride, 
+                              const int height_col, const int width_col,
+                              float* data_im) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index >= n) return;
+    
+    int m = height_col * width_col;
+    
+    int spatial_idx = index % m;
+    int kernel_idx = index / m;
+    
+    int w_out = spatial_idx % width_col;
+    int h_out = spatial_idx / width_col;
+    
+    int k_sq = ksize * ksize;
+    int channel_in = kernel_idx / k_sq;
+    int k_rem = kernel_idx % k_sq;
+    int u = k_rem / ksize;
+    int v = k_rem % ksize;
+    
+    int h_in = h_out * stride - pad + u;
+    int w_in = w_out * stride - pad + v;
+    
+    if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
+        float val = data_col[index];
+        atomicAdd(&data_im[(channel_in * height + h_in) * width + w_in], val);
+    }
+}
+
+void col2im_gpu(float* d_col_buffer, float* d_grad_input,
+                int in_channels, int height, int width, int ksize, int padding, 
+                int stride, int height_out, int width_out) {
+    int m = height_out * width_out;
+    int k = in_channels * ksize * ksize;
+    int num_kernels = m * k;
+    
+    int threads = 256;
+    int blocks = (num_kernels + threads - 1) / threads;
+    
+    col2im_kernel<<<blocks, threads>>>(num_kernels, d_col_buffer, height, width, ksize, padding, 
+                                       stride, height_out, width_out, d_grad_input);
+}
+
+
+// =========================================================================
+// Forward & Backward
+// =========================================================================
+
+void forward_conv(float* d_input, float* d_output, float* d_weight, float* d_col_buffer,
+                  int batch_size, int in_channels, int out_channels, 
+                  int height, int width, int ksize, int stride, int padding,
+                  cublasHandle_t handle) {
+
+    int height_out = (height + 2 * padding - ksize) / stride + 1;
+    int width_out = (width + 2 * padding - ksize) / stride + 1;
+
+    int m = height_out * width_out; 
+    int n = out_channels;           
+    int k = in_channels * ksize * ksize; 
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    for (int b = 0; b < batch_size; ++b) {
+        im2col_gpu(d_input + b * in_channels * height * width, 
+                   d_col_buffer, 
+                   in_channels, height, width, ksize, padding, stride, height_out, width_out);
+
+        cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
+                    m, n, k,
+                    &alpha,
+                    d_col_buffer, m,  
+                    d_weight, k,      
+                    &beta,
+                    d_output + b * out_channels * height_out * width_out, m);
+    }
+
+    //print_debug_stats_conv("Conv Fwd Input", d_input, batch_size * in_channels * height * width);
+    //print_debug_stats_conv("Conv Fwd Weight", d_weight, out_channels * in_channels * ksize * ksize);
+    print_debug_stats_conv("Conv Fwd Output", d_output, batch_size * out_channels * height_out * width_out);
+
+}
+
+void backward_conv(float* d_input, float* d_grad_output, float* d_weight, 
+                   float* d_col_buffer, float* d_grad_input, float* d_grad_weight,
+                   int batch_size, int in_channels, int out_channels, 
+                   int height, int width, int ksize, int stride, int padding,
+                   cublasHandle_t handle) {
+
+    int height_out = (height + 2 * padding - ksize) / stride + 1;
+    int width_out = (width + 2 * padding - ksize) / stride + 1;
+    
+    int m = height_out * width_out;
+    int n = out_channels;
+    int k = in_channels * ksize * ksize;
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    float beta_one = 1.0f; 
+
+    //print_debug_stats_conv("Conv Bwd: Input Grad_Output", d_grad_output, batch_size * n * m);
+
+    CHECK_CUDA(cudaMemset(d_grad_weight, 0, sizeof(float) * out_channels * k));
+    CHECK_CUDA(cudaMemset(d_grad_input, 0, sizeof(float) * batch_size * in_channels * height * width));
+    
+    for(int i=0; i<batch_size; i++) {
+        im2col_gpu(d_input + i * in_channels * height * width, d_col_buffer,
+                   in_channels, height, width, ksize, padding, stride, height_out, width_out);
+        
+        // dW
+        cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                    k, n, m,
+                    &alpha,
+                    d_col_buffer, m,
+                    d_grad_output + i * n * m, m,
+                    &beta_one, 
+                    d_grad_weight, k);
+
+        // dX_col
+        cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_T,
+                    m, k, n,
+                    &alpha,
+                    d_grad_output + i * n * m, m, 
+                    d_weight, k, 
+                    &beta, 
+                    d_col_buffer, m);
+        
+        col2im_gpu(d_col_buffer, 
+                   d_grad_input + i * in_channels * height * width,
+                   in_channels, height, width, ksize, padding, stride, height_out, width_out);
+    }
+
+    //print_debug_stats_conv("Conv Bwd: Result dInput", d_grad_input, batch_size * in_channels * height * width);
+    //print_debug_stats_conv("Conv Bwd: Result dWeight", d_grad_weight, out_channels * k);
+}
+==================== END OF FILE: conv_layer.cu ====================
